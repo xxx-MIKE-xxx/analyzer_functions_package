@@ -115,7 +115,7 @@ def run_pipeline(
     slf.pipeline(skel_3d, json.loads(json_3d))
 
     df_reps  = sd.pipeline(keypoints=imputed, start_frame=ref_frame)
-    df_ffpa  = ikn.pipeline(imputed, df_reps)
+    df_ffpa  = ikn.pipeline(imputed, df_reps, output_csv=outdir / "ffpa_report.csv")
     df_heel  = hra.pipeline(imputed, df_reps)
     df_fk    = fka.pipeline(imputed, df_reps, lengths_json=json_2d)
     df_depth = sda.pipeline(imputed, df_reps, lengths_json=json_2d)
