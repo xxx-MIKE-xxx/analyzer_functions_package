@@ -149,7 +149,7 @@ run([MOTIONBERT_ROOT / "run_motionbert.sh", jobdir])
 # ─────────────────────── Convert + analytics ───────────────────────
 x3d_npy = save_x3d_npy(jobdir / "motionbert")
 
-from analyzer_functions import run_pipeline  # noqa:  E402  (lazy import)
+from analyzer_pkg.analysis import run_pipeline  # noqa:  E402  (lazy import)
 
 app = Flask(__name__)
 with app.app_context():

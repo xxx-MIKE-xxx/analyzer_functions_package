@@ -1,7 +1,7 @@
 # tasks.py
 from celery import Celery
-from analyzer_functions.pipeline   import run_pipeline
-from analyzer_functions.reporting  import build_master_report
+from analyzer_pkg.analysis.pipeline   import run_pipeline
+from analyzer_pkg.analysis.reporting  import build_master_report
 
 celery_app = Celery(__name__)
 celery_app.config_from_object("your_settings_module")
