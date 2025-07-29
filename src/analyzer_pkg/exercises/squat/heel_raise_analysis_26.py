@@ -46,7 +46,7 @@ def _median_y(
     data: np.ndarray,
     frames: Sequence[int],
     idx: int,
-    conf_thresh: float = 0.20,
+    conf_thresh: float = 0.0,
 ) -> float:
     """Median y of keypoint *idx* across *frames* (skip low-conf pts)."""
     coords = [
@@ -89,8 +89,8 @@ def analyze_heel_raise_report(
     keypoints: np.ndarray,
     reps: str | Path | pd.DataFrame,
     *,
-    threshold: float = 0.02,
-    conf_thresh: float = 0.20,
+    threshold: float = 0.01,
+    conf_thresh: float = 0.00,
 ) -> list[dict]:
     """
     Detect heel raise for each repetition.
@@ -177,9 +177,9 @@ def main() -> None:
     parser.add_argument("--reps",      type=Path, default="repetition_data.csv",
                         help="CSV with rep_id,start,mid,end (or rep_* variants)")
     parser.add_argument("--output",    type=Path, default="heel_raise_report.csv")
-    parser.add_argument("--threshold", type=float, default=0.02,
+    parser.add_argument("--threshold", type=float, default=0.01,
                         help="Lift distance threshold in unit coordinates (default 0.02)")
-    parser.add_argument("--conf",      type=float, default=0.20,
+    parser.add_argument("--conf",      type=float, default=0.0,
                         help="Minimum keypoint confidence")
     args = parser.parse_args()
 
@@ -206,8 +206,8 @@ def pipeline(
     keypoints: str | Path | np.ndarray,
     reps: str | Path | pd.DataFrame,
     *,
-    threshold: float = 0.02,
-    conf_thresh: float = 0.20,
+    threshold: float = 0.01,
+    conf_thresh: float = 0.0,
 ) -> pd.DataFrame:
     """
     Run the heel-raise analysis end-to-end and return a DataFrame.

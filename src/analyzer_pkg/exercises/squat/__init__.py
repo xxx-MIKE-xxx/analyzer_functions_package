@@ -1,11 +1,17 @@
 """
-Public API for the *analyzer_functions* package.
+Public surface for the *squat* exercise.
+
+Exports
+-------
+run_pipeline                 – high‑level end‑to‑end pipeline
+parse_frame_spec, …, helpers – individual utilities that other
+                               exercises or notebooks may reuse
 """
 
-# ─── High-level entry points ────────────────────────────────────────────────
-from .full_pipeline_driver import run_pipeline 
+# ── High‑level entry point ────────────────────────────────────────
+from .driver import run_pipeline          # ⬅️  points to driver.py (new)
 
-# ─── Low-level helpers you may want to reuse elsewhere ──────────────────────
+# ── Low‑level helpers you may want to reuse elsewhere ────────────
 from .compute_reference_lengths import (
     parse_frame_spec,
     compute_lengths,
@@ -16,10 +22,10 @@ from .heel_raise_analysis_26 import (
     analyze_heel_raise_report as analyze_heel_raise_detailed,
 )
 
-__all__ = [
-    # high-level
+__all__: list[str] = [
+    # high‑level
     "run_pipeline",
-       # helpers
+    # helpers
     "parse_frame_spec",
     "compute_lengths",
     "enforce_symmetry",
