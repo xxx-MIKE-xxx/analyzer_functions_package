@@ -1,0 +1,6 @@
+Looking in indexes: https://download.pytorch.org/whl/cu121
+Requirement already satisfied: torch in ./.venv/lib/python3.12/site-packages (2.5.1+cu121)
+Requirement already satisfied: torchvision in ./.venv/lib/python3.12/site-packages (0.20.1+cu121)
+Requirement already satisfied: torchaudio in ./.venv/lib/python3.12/site-packages (2.5.1+cu121)
+Requirement already satisfied: Cython in ./.venv/lib/python3.12/site-packages (0.29.37)
+Requirement already satisfied: numpy in ./.venv/lib/python3.12/site-packages (2.1.2)
