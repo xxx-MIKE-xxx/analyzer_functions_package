@@ -1,0 +1,15 @@
+
+ruff>=0.4
+black>=24.4
+mypy>=1.10
+pytest>=8.0
+pytest-rerunfailures>=14.0
+ipython>=8.25
+ipdb>=0.13
+jupyterlab>=4.2
+jupytext>=1.16
+pip-tools>=7.5
+pre-commit>=3.7
+torch-tb-profiler>=0.4
+tensorboard>=2.16
+
