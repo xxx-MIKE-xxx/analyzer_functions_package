@@ -1,3 +1,0 @@
-video_path=/mnt/c/Users/User/Desktop/folder/output/job_mov1/src.mp4
-width=1080
-height=1920
