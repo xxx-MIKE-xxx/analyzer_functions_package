@@ -97,15 +97,20 @@ def run_pipeline(
 
     # ────────────── 4. remaining stack ───────────────────────────
     skel_2d = convert.pipeline(alphapose)
-    skel_3d = kpf.pipeline(X3D_pose_path, kernel_size=5)
-    skel_3d = m3u.pipeline(
-        skel_3d, out_path=run_dir / "motionbert_scaled.npy"
+    skel_3d_raw = kpf.pipeline(X3D_pose_path, kernel_size=5)
+    ref_frame = rff.run_exercise_analysis(
+        skel_2d, skel_3d_raw,
+        reference_value=reference_skeleton,
+        exercise_type=exercise,
+        reference_type="file",
+    )
+    skel_3d, _ = m3u.pipeline(          # <- returns (stable, adaptive)
+        skel_3d_raw,
+        ref_idx    = ref_frame,
+        out_stable = run_dir / "motionbert_scaled.npy",
     )
     _mirror(run_dir / "motionbert_scaled.npy", outdir)
 
-    ref_frame = rff.run_exercise_analysis(
-        skel_2d, skel_3d, reference_value=reference_skeleton
-    )
 
     len3d, len2d = pipeline_reference_lengths(
         input_3d=skel_3d, input_2d=imputed, frames=str(ref_frame)

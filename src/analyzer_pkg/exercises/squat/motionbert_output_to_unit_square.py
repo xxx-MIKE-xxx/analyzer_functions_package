@@ -1,71 +1,75 @@
 #!/usr/bin/env python3
 """
-motionbert_output_to_unit_square.py
-───────────────────────────────────
-Normalises the *(x, y)* part of a MotionBERT **(F, 17, 3)** array so every
-coordinate lives in the unit square:
-
-    (0, 0) ─ bottom-left      (1, 1) ─ top-right
-
-• **x** : left → right  → divide by global *max x*  
-• **y** : top → bottom → divide by global *max y* **and** flip so bottom = 0  
-• **z** : unchanged (still in metres)
-
-API mirrors `json_to_npy.pipeline` for consistency.
+motionbert_output_to_unit_square.py  – reference‑frame version
 """
-from __future__ import annotations
 
-import sys
+from __future__ import annotations
 from pathlib import Path
-from typing import Union
+from typing import Tuple, Union, Optional, List
 
 import numpy as np
+from scipy.ndimage import median_filter
 
+EPS = 1e-8
 
-# ────────────────────────── public helper ──────────────────────────
+# ── bbox utilities ───────────────────────────────────────────────
+def _adaptive_bbox(kps: np.ndarray) -> Tuple[float, float, float]:
+    valid = (kps[:, 2] > 0.05) if kps.shape[1] == 3 else ~np.isnan(kps[:, 0])
+    if not np.any(valid):
+        return 0.0, 0.0, 1.0
+    xs, ys = kps[valid, 0], kps[valid, 1]
+    xmin, xmax, ymin, ymax = xs.min(), xs.max(), ys.min(), ys.max()
+    side = max(xmax - xmin, ymax - ymin) or 1.0
+    cx, cy = (xmin + xmax) / 2.0, (ymin + ymax) / 2.0
+    return cx - side / 2.0, cy - side / 2.0, side
+
+def _normalise(kps: np.ndarray, bbox: Tuple[float, float, float]) -> np.ndarray:
+    xmin, ymin, side = bbox
+    out = kps.copy()
+    if side < EPS:
+        return out
+    valid = (out[:, 2] > 0.05) if out.shape[1] == 3 else ~np.isnan(out[:, 0])
+    out[valid, 0] = (out[valid, 0] - xmin) / side
+    out[valid, 1] = (out[valid, 1] - ymin) / side
+    return out
+
+# ── public API ───────────────────────────────────────────────────
 def pipeline(
-    x3d: Union[str, Path, np.ndarray],
-    out_path: Union[str, Path, None] = None,
-) -> np.ndarray:
+    x3d: str | Path | np.ndarray,
+    *,
+    ref_idx: int,
+    out_stable: str | Path | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Parameters
-    ----------
-    x3d       : (F, 17, 3) array **or** path to an .npy file.
-    out_path  : optional destination to save the scaled array.
+    Returns (stable_array, adaptive_array).
 
-    Returns
-    -------
-    ndarray of shape (F, 17, 3) with x,y ∈ [0, 1]; z unchanged.
+    • stable side‑length = side of ref_idx frame
+    • adaptive is still computed (may be handy for debugging)
     """
-    # 1) load / copy
-    arr = np.load(x3d) if not isinstance(x3d, np.ndarray) else x3d
-    arr = arr.astype(np.float32, copy=True)          # avoid mutating caller data
+    arr_in = np.load(x3d) if not isinstance(x3d, np.ndarray) else x3d
+    arr_in = arr_in.astype(np.float32, copy=True)
+    F      = arr_in.shape[0]
 
-    # 2) global bounds (ignore NaNs)
-    max_x = float(np.nanmax(arr[..., 0]))
-    max_y = float(np.nanmax(arr[..., 1]))
-    fx, fy = (1.0 / max_x if max_x else 1.0,
-              1.0 / max_y if max_y else 1.0)
+    # pass 1 – adaptive arrays / boxes
+    adaptive_bb: List[Tuple[float, float, float]] = []
+    adaptive = arr_in.copy()
+    for f in range(F):
+        bb = _adaptive_bbox(arr_in[f])
+        adaptive_bb.append(bb)
+        adaptive[f] = _normalise(arr_in[f], bb)
 
-    # 3) scale in-place
-    valid = ~np.isnan(arr[..., 0]) & ~np.isnan(arr[..., 1])
-    arr[..., 0][valid] *= fx
-    arr[..., 1][valid] = 1.0 - (arr[..., 1][valid] * fy)   # flip Y
+    # side length of reference frame
+    S_ref = adaptive_bb[ref_idx][2] or 1.0
 
-    # 4) optional save
-    if out_path is not None:
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(out_path, arr)
-        print(f"✅ wrote {out_path}  shape={arr.shape}")
+    # pass 2 – stable array
+    stable = arr_in.copy()
+    for f, (xmin, ymin, _) in enumerate(adaptive_bb):
+        stable[f] = _normalise(arr_in[f], (xmin, ymin, S_ref))
 
-    return arr
+    if out_stable:
+        p = Path(out_stable)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        np.save(p, stable)
+        print(f"✅ stable array (ref {ref_idx}) → {p}  shape={stable.shape}")
 
-
-# ────────────────────────── CLI entry ──────────────────────────────
-if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3):
-        sys.exit("Usage:\n  python motionbert_output_to_unit_square.py <in-npy> [out-npy]")
-    _inp  = sys.argv[1]
-    _out  = sys.argv[2] if len(sys.argv) == 3 else None
-    pipeline(_inp, _out)
+    return stable, adaptive
