@@ -41,10 +41,10 @@ def draw_skel(img,kp):
     for (i,j) in LINKS:
         xi,yi,ci = kp[i]; xj,yj,cj = kp[j]
         if ci>=CONF_TH and cj>=CONF_TH and not np.isnan([xi,yi,xj,yj]).any():
-            cv2.line(img,(int(xi),int(yi)),(int(xj),int(yj)),(255,0,0),1)
+            #cv2.line(img,(int(xi),int(yi)),(int(xj),int(yj)),(255,0,0),1)
     for x,y,c in kp:
         if c>=CONF_TH and not np.isnan([x,y]).any():
-            cv2.circle(img,(int(x),int(y)),2,(0,255,0),-1)
+            #cv2.circle(img,(int(x),int(y)),2,(0,255,0),-1)
 
 # ------------------------------------------------------------------ signed distance helper
 
@@ -63,8 +63,8 @@ rep_start={int(r.start):(int(r.rep_id),int(r.end)) for _,r in reps.iterrows()}
 
 # ------------------------------------------------------------------ video IO
 W,H=FRAME_SIZE
-out=cv2.VideoWriter(VIDEO_OUT,cv2.VideoWriter_fourcc(*"MJPG"),FPS,(W,H))
-cap=cv2.VideoCapture(VIDEO_IN) if VIDEO_IN else None
+#out=cv2.VideoWriter(VIDEO_OUT,cv2.VideoWriter_fourcc(*"MJPG"),FPS,(W,H))
+#cap=cv2.VideoCapture(VIDEO_IN) if VIDEO_IN else None
 
 # state vars
 path_pts=[]
@@ -98,9 +98,9 @@ for f in range(kps.shape[0]):
 
     # draw path & ideal line
     for i in range(1,len(path_pts)):
-        cv2.line(frame,path_pts[i-1],path_pts[i],(0,255,255),2)
+        #cv2.line(frame,path_pts[i-1],path_pts[i],(0,255,255),2)
     if ideal_A:
-        cv2.line(frame,(int(ideal_A[0]),int(ideal_A[1])),(int(ideal_B[0]),int(ideal_B[1])),(100,100,255),1)
+        #cv2.line(frame,(int(ideal_A[0]),int(ideal_A[1])),(int(ideal_B[0]),int(ideal_B[1])),(100,100,255),1)
 
     # --- dynamic rep end (return to start height OR nominal end)
     end_now=False
@@ -116,13 +116,13 @@ for f in range(kps.shape[0]):
             pf,dv=info
             px,py=int(hip_x[pf]),int(hip_y[pf])
             ratio=abs(dv)/LEG_LEN
-            cv2.circle(frame,(px,py),6,(0,0,255),-1)
-            cv2.putText(frame,f"{ratio*100:.1f}% {side} {sev(ratio)}",
+            #cv2.circle(frame,(px,py),6,(0,0,255),-1)
+            #cv2.putText(frame,f"{ratio*100:.1f}% {side} {sev(ratio)}",
                         (px+10,py-10),cv2.FONT_HERSHEY_SIMPLEX,0.55,(0,0,255),2)
         # reset
         ideal_A=ideal_B=start_y=nom_end=None; path_pts.clear(); peak={'left':None,'right':None}
 
-    cv2.putText(frame,f"Frame {f}",(10,30),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,255),2)
+    #cv2.putText(frame,f"Frame {f}",(10,30),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,255),2)
     out.write(frame)
 
 out.release()

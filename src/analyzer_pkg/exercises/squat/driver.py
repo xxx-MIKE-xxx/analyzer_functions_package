@@ -98,10 +98,14 @@ def run_pipeline(
     # ────────────── 4. remaining stack ───────────────────────────
     skel_2d = convert.pipeline(alphapose)
     skel_3d = kpf.pipeline(X3D_pose_path, kernel_size=5)
-    skel_3d = m3u.pipeline(
-        skel_3d, out_path=run_dir / "motionbert_scaled.npy"
-    )
-    _mirror(run_dir / "motionbert_scaled.npy", outdir)
+    skel_3d, skel_3d_adapt = m3u.pipeline(
+    skel_3d,
+    out_stable   = run_dir / "motionbert_scaled.npy",
+    out_adaptive = run_dir / "motionbert_scaled_adapt.npy",
+)
+# keep both files for triage
+    _mirror(run_dir / "motionbert_scaled.npy",          outdir)
+    _mirror(run_dir / "motionbert_scaled_adapt.npy",    outdir)
 
     ref_frame = rff.run_exercise_analysis(
         skel_2d, skel_3d, reference_value=reference_skeleton
