@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
-# ref_frame_find.py              (2025-07 hot-fix)
-# ──────────────────────────────────────────────────────────────────────────────
-# Robust “best-standing-frame” selector
+# ref_frame_find.py  – 2025‑07 hot‑fix
+# ------------------------------------------------------------------
+# Robust “best‑standing‑frame” selector
 #
-#  • Finds the frame whose pose **shape** matches a reference skeleton
-#     (or, if no reference provided, just returns the middle frame).
-#  • Ignores global translation, handles NaNs, and is tolerant to
-#    mirror-flipped recordings.
-#  • API is *drop-in compatible* with the previous version.
-# ──────────────────────────────────────────────────────────────────────────────
-import os, logging, numpy as np
+# • Finds the frame whose pose **shape** is closest to a reference
+#   skeleton (or picks the middle of the video if no reference given).
+# • Translation‑invariant, NaN‑aware, tolerant to mirror flips.
+# • Now scans the **first 30 %** of frames and, for squats, uses
+#   **all 17 COCO key‑points**.
+# ------------------------------------------------------------------
+from __future__ import annotations
+
+import logging, os
 from typing import Sequence
 
-# ── logging -----------------------------------------------------------
+import numpy as np
+
+# ───────────────────── logging setup ──────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s │ %(levelname)s │ %(message)s",
+    format="%(asctime)s │ %(levelname)-7s │ %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("exercise_analysis")
 
-# ── joint subsets per exercise ---------------------------------------
+# ───────────────── joint subsets per exercise ─────────────────
 EXERCISE_KEYPOINTS: dict[str, Sequence[int]] = {
-    "squat":   [11, 12, 13, 14, 15, 16],        # hips → ankles
-    "pushup":  [ 5,  6,  7,  8,  9, 10],        # shoulders → wrists
-    "plank":   [ 5,  6, 11, 12],                # shoulders + hips
-    "default": list(range(17)),                 # all 17 COCO joints
+    # use the *full* skeleton for squats
+    "squat":   list(range(17)),                 # 0 … 16
+    # legacy defaults for other movements
+    "pushup":  [5, 6, 7, 8,  9, 10],            # shoulders → wrists
+    "plank":   [5, 6, 11, 12],                  # shoulders + hips
+    "default": list(range(17)),
 }
 
-# ── helper: robust distance frame ↔ reference ------------------------
+# ───────────── helper: robust pose distance ────────────────
 def _pose_distance(frame: np.ndarray,
                    ref: np.ndarray,
                    kp_idx: Sequence[int],
                    *,
                    mirror: bool = False) -> float:
     """
-    Translation-invariant, NaN-aware, optional left/right-mirror distance.
-    frame, ref : (J, D) arrays   D = 2 or 3
+    NaN‑aware, translation‑invariant distance between two poses.
+    Optionally mirrors the *frame* horizontally (needed for selfie cams).
     """
-    # 1) restrict to the joints we care about
     f = frame[kp_idx].copy()
     r = ref[kp_idx].copy()
 
     if mirror:
-        # horizontal mirror: X → 1-X  (works for unit-square coords)
+        # x ∈ [0,1]; flip horizontally
         f[:, 0] = 1.0 - f[:, 0]
 
-    # 2) subtract hip-centre to remove global XY offset (if hips available)
-    #    – fall back to mean over kp_idx otherwise
+    # centre both poses at hip‑centre (if available) or overall mean
     def _centre(pts: np.ndarray) -> np.ndarray:
         if 11 in kp_idx and 12 in kp_idx:
             return pts[[kp_idx.index(11), kp_idx.index(12)]].mean(axis=0)
@@ -56,26 +60,39 @@ def _pose_distance(frame: np.ndarray,
     f -= _centre(f)
     r -= _centre(r)
 
-    # 3) per-joint Euclidean distance, ignoring NaNs
+    # per‑joint distance, ignoring NaNs
     valid = ~np.isnan(f).any(axis=1) & ~np.isnan(r).any(axis=1)
     if not valid.any():
-        return np.inf                      # no usable joints in this frame
+        return np.inf
 
     d = np.linalg.norm(f[valid] - r[valid], axis=1)
 
-    # 4) robust aggregate – trimmed mean (drop top 25 %)
-    k = max(1, int(0.75 * len(d)))
-    return np.sort(d)[:k].mean()
+    # trimmed mean (drop the noisiest 25 %)
+    keep = max(1, int(0.75 * len(d)))
+    return float(np.sort(d)[:keep].mean())
 
 
-# ── main class --------------------------------------------------------
+# ───────────────────── main analyser class ────────────────────
 class ExerciseAnalyzer:
+    """
+    Finds the reference (standing) frame.
+
+    Parameters
+    ----------
+    file_2d / file_3d : path or ndarray
+        Normalised unit‑square keypoint sequences, shape (F,17,2/3).
+    reference_type : "auto" | "frame" | "file"
+    reference_value:
+        • int  – exact frame index (if reference_type=="frame")
+        • path/ndarray – reference skeleton (if reference_type=="file")
+    exercise_type  : e.g. "squat"
+    """
     def __init__(
         self,
         file_2d=None,
         file_3d=None,
-        reference_type: str = "auto",     # "auto" | "frame" | "file"
-        reference_value=None,             # int | str/ndarray
+        reference_type: str = "auto",
+        reference_value=None,
         exercise_type: str = "default",
         output_dir: str | None = None,
     ):
@@ -88,60 +105,52 @@ class ExerciseAnalyzer:
 
         if self.reference_value is not None and self.reference_type == "auto":
             self.reference_type = "file"
-            logger.info("Reference value provided → switching reference_type to 'file'")
+            logger.info("Reference provided → switch to reference_type='file'")
 
-        self.skeleton_2d: np.ndarray | None = None
-        self.skeleton_3d: np.ndarray | None = None
+        self.skel2d: np.ndarray | None = None
+        self.skel3d: np.ndarray | None = None
         self.reference_frame_idx: int | None = None
 
-        self.keypoints = EXERCISE_KEYPOINTS.get(exercise_type,
-                                                EXERCISE_KEYPOINTS["default"])
-
-        logger.info(f"Initializing analyzer for '{exercise_type}'")
-        logger.info(f"Reference mode: '{self.reference_type}'")
+        self.kp_subset = EXERCISE_KEYPOINTS.get(
+            exercise_type, EXERCISE_KEYPOINTS["default"]
+        )
 
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-    # ── data loading ----------------------------------------------------
-    def _load(self) -> bool:
-        try:
-            if self.file_2d is not None:
-                self.skeleton_2d = (
-                    np.load(self.file_2d) if isinstance(self.file_2d, str)
-                    else np.asarray(self.file_2d)
-                )
-                logger.info(f"Using 2D → {self.skeleton_2d.shape}")
+    # ───────────── data loading helpers ──────────────
+    def _load(self) -> None:
+        if self.file_2d is not None:
+            self.skel2d = (
+                np.load(self.file_2d) if isinstance(self.file_2d, str)
+                else np.asarray(self.file_2d)
+            )
+            logger.info(f"Using 2‑D  → {self.skel2d.shape}")
 
-            if self.file_3d is not None:
-                self.skeleton_3d = (
-                    np.load(self.file_3d) if isinstance(self.file_3d, str)
-                    else np.asarray(self.file_3d)
-                )
-                logger.info(f"Using 3D → {self.skeleton_3d.shape}")
+        if self.file_3d is not None:
+            self.skel3d = (
+                np.load(self.file_3d) if isinstance(self.file_3d, str)
+                else np.asarray(self.file_3d)
+            )
+            logger.info(f"Using 3‑D  → {self.skel3d.shape}")
 
-            if self.skeleton_2d is None and self.skeleton_3d is None:
-                raise ValueError("Need at least one of file_2d / file_3d")
+        if self.skel2d is None and self.skel3d is None:
+            raise ValueError("Need at least one of file_2d / file_3d")
 
-            return True
-        except Exception as e:
-            logger.error(f"Loading error: {e}")
-            return False
-
-    # ── reference-frame detection --------------------------------------
+    # ───────────── reference‑frame search ─────────────
     def detect_reference_frame(self) -> None:
-        # 1) fixed idx supplied
+        self._load()
+        data = self.skel2d if self.skel2d is not None else self.skel3d
+        total_frames = data.shape[0]
+        dims         = data.shape[2]
+
+        # 1. explicit frame supplied ----------------------------------
         if self.reference_type == "frame":
             self.reference_frame_idx = int(self.reference_value)
             logger.info(f"Fixed reference frame → {self.reference_frame_idx}")
             return
 
-        # 2) pick data stream (prefer 2-D)
-        data = self.skeleton_2d if self.skeleton_2d is not None else self.skeleton_3d
-        total = data.shape[0]
-        dims  = data.shape[2]
-
-        # 3) external reference skeleton supplied
+        # 2. use external reference skeleton --------------------------
         if self.reference_type == "file":
             ref = (
                 np.load(self.reference_value) if isinstance(self.reference_value, str)
@@ -150,37 +159,38 @@ class ExerciseAnalyzer:
             if ref.shape != (data.shape[1], dims):
                 raise ValueError(f"Reference skeleton must be {(data.shape[1], dims)}")
 
-            # distance curve for original + mirrored pose
-            cutoff = max(1, int(0.2 * total))
-            dists  = np.zeros(cutoff)
+            search_limit = max(1, int(0.30 * total_frames))   # ← 30 %
+            distances = np.empty(search_limit, np.float32)
 
-            for f in range(cutoff):
-                d  = _pose_distance(data[f], ref, self.keypoints, mirror=False)
-                dm = _pose_distance(data[f], ref, self.keypoints, mirror=True)
-                dists[f] = min(d, dm)
+            for f in range(search_limit):
+                d  = _pose_distance(data[f], ref, self.kp_subset, mirror=False)
+                dm = _pose_distance(data[f], ref, self.kp_subset, mirror=True)
+                distances[f] = min(d, dm)
 
-            # light smoothing
-            if cutoff >= 3:
-                dists = np.convolve(dists, np.ones(3)/3, mode="same")
+            # light 3‑pt running mean to smooth noise
+            if search_limit >= 3:
+                distances = np.convolve(distances, np.ones(3)/3, mode="same")
 
-            best = int(np.nanargmin(dists))
+            best = int(np.nanargmin(distances))
             self.reference_frame_idx = best
-            logger.info(f"Matched reference at frame {best} (first 20 %)")
+            logger.info(f"Matched reference at frame {best} (first 30 %)")
             return
 
-        # 4) auto = pick middle frame
-        self.reference_frame_idx = total // 2
-        logger.info(f"Auto-chosen reference frame {self.reference_frame_idx}")
+        # 3. fallback → simply take the middle frame ------------------
+        self.reference_frame_idx = total_frames // 2
+        logger.info(f"Auto‑chosen reference frame {self.reference_frame_idx}")
 
-    # ── public driver ---------------------------------------------------
+    # ───────────── convenience façade ─────────────
     def analyze_exercise(self) -> bool:
-        if not self._load():
+        try:
+            self.detect_reference_frame()
+            return True
+        except Exception as e:
+            logger.error(f"Reference‑frame detection failed: {e}")
             return False
-        self.detect_reference_frame()
-        return True
 
 
-# ── functional wrapper (kept for back-compat) ------------------------
+# ───────────── functional wrapper (back‑compat) ─────────────
 def run_exercise_analysis(
     file_2d,
     file_3d=None,
@@ -189,7 +199,9 @@ def run_exercise_analysis(
     exercise_type: str = "default",
     output_dir: str | None = None,
 ):
-    """Return best reference frame index (or None on failure)."""
+    """
+    Returns the best reference‑frame index (int) or **None** on failure.
+    """
     ana = ExerciseAnalyzer(
         file_2d=file_2d,
         file_3d=file_3d,

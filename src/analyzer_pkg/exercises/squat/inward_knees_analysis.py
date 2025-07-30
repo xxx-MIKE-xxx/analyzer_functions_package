@@ -23,13 +23,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
-# ------------------ FPPA math helpers ------------------
+_EPS = 1e-8 
 def _angle(v1: np.ndarray, v2: np.ndarray) -> float:
-    """Return the interior angle (deg) between two 2-D vectors."""
+    """
+    Interior angle (deg) between two 2‑D vectors.
+    Returns NaN if one of the vectors has ~zero length.
+    """
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+    den = n1 * n2
+    if den < _EPS:
+        return float("nan")          # unreliable – later filters will skip
     num = float(np.dot(v1, v2))
-    den = float(np.linalg.norm(v1) * np.linalg.norm(v2))
     return float(np.degrees(np.arccos(np.clip(num / den, -1.0, 1.0))))
+
 
 
 def _signed_dist(pt: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> float:
