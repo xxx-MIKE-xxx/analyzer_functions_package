@@ -3,16 +3,13 @@
 alphapose_bbox_overlay.py – stable‑bbox overlay + diagnostics
 ──────────────────────────────────────────────────────────────
 Draws the **stable yellow square** detected from the video, not the
-per‑frame adaptive one.  Also fixes stick‑figure orientation and colours
-the diagnostic plot.
+per‑frame adaptive one. Adds all keypoints, prints them, and overlays the frame number.
 
 Usage
 -----
 python -m debug_tools.alphapose_bbox_overlay                               \
        --alphapose alphapose-results.json --video src.mp4                  \
-       --out bbox_overlay.mp4                                              \
-       --stickman stickman.mp4                                             \
-       --plot side_length.png
+       --out bbox_overlay.mp4
 """
 from __future__ import annotations
 
@@ -22,8 +19,6 @@ from typing import List, Tuple
 
 import cv2, numpy as np, matplotlib.pyplot as plt
 
-
-# ───────────────────────── loading ──────────────────────────
 def load_kps(json_path: str | Path) -> dict[int, np.ndarray]:
     with open(json_path) as f:
         raw = json.load(f)
@@ -33,8 +28,6 @@ def load_kps(json_path: str | Path) -> dict[int, np.ndarray]:
         out[idx] = np.asarray(e["keypoints"], np.float32).reshape(-1, 3)
     return out
 
-
-# ───────────────────── square utilities ─────────────────────
 def adaptive_bbox(k: np.ndarray) -> Tuple[float, float, float]:
     vis = k[:, 2] > 0.05
     if not np.any(vis):
@@ -44,30 +37,23 @@ def adaptive_bbox(k: np.ndarray) -> Tuple[float, float, float]:
     cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
     return cx - side / 2, cy - side / 2, side
 
-
 def compute_stable_side(sides: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray]:
-    """Return keep‑mask, S* and smoothed series."""
     smooth = cv2.blur(sides.reshape(-1, 1), (9, 1)).ravel()
     p5, p95 = np.nanpercentile(smooth, [5, 95])
     keep = (smooth >= p5) & (smooth <= p95)
     S_star = np.nanmedian(smooth[keep]) or 1.0
     return keep, float(S_star), smooth
 
-
-# ─────────────────────── overlay video ──────────────────────
-def overlay_video(src: str | Path, kps: dict[int, np.ndarray],
-                  dst: str | Path) -> np.ndarray:
+def overlay_video(src: str | Path, kps: dict[int, np.ndarray], dst: str | Path) -> np.ndarray:
     cap = cv2.VideoCapture(str(src))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open {src}")
-    fps, W, H = (cap.get(cv2.CAP_PROP_FPS) or 30,
-                 int(cap.get(3)), int(cap.get(4)))
+    fps, W, H = (cap.get(cv2.CAP_PROP_FPS) or 30, int(cap.get(3)), int(cap.get(4)))
     vw = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
 
     adaptive_sides: List[float] = []
     centres: List[Tuple[float, float]] = []
 
-    # pass 1 – gather adaptive bboxes
     F = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     for f in range(F):
         k = kps.get(f)
@@ -81,17 +67,29 @@ def overlay_video(src: str | Path, kps: dict[int, np.ndarray],
 
     keep, S_star, _ = compute_stable_side(np.asarray(adaptive_sides))
 
-    # rewind & draw with *stable* side
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     for f in range(F):
         ok, frame = cap.read()
         if not ok:
             break
         x0, y0 = centres[f]
+        k = kps.get(f)
+        # Draw bbox
         if not np.isnan(x0):
-            x1, y1 = int(max(0,           x0)),          int(max(0,           y0))
+            x1, y1 = int(max(0, x0)), int(max(0, y0))
             x2, y2 = int(min(W - 1, x0 + S_star)), int(min(H - 1, y0 + S_star))
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        # Draw keypoints
+        if k is not None:
+            for idx, (x, y, conf) in enumerate(k):
+                color = (0, 0, 255) if conf > 0.05 else (160, 160, 160)
+                cv2.circle(frame, (int(x), int(y)), 4, color, -1)
+            # Draw keypoint coordinates on the frame for debug (optional, can remove if cluttered)
+            # For concise display, show only for the first 3 keypoints as an example:
+            # txt = " ".join([f"{int(x)},{int(y)}" for (x, y, c) in k[:3]])
+            # cv2.putText(frame, txt, (15, 60), cv2.FONT_HERSHEY_PLAIN, 1.1, (0, 255, 0), 1)
+        # Draw frame number
+        cv2.putText(frame, f"Frame {f}", (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 0), 2)
         vw.write(frame)
 
     cap.release(); vw.release()
@@ -99,14 +97,12 @@ def overlay_video(src: str | Path, kps: dict[int, np.ndarray],
     return np.asarray(adaptive_sides, np.float32)
 
 
-# ───────────────────── stick‑figure video ────────────────────
+# -- main unchanged --
 def stickman_video(kps: dict[int, np.ndarray], dst: str | Path, L: int = 512):
     vw = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), 30, (L, L))
     F = max(kps) + 1
     for f in range(F):
         canvas = np.full((L, L, 3), 255, np.uint8)
-
-        # grid
         for v in np.linspace(0, 1, 11):
             y = int((1 - v) * (L - 1)); x = int(v * (L - 1))
             cv2.line(canvas, (0, y), (L - 1, y), (230, 230, 230), 1)
@@ -118,20 +114,16 @@ def stickman_video(kps: dict[int, np.ndarray], dst: str | Path, L: int = 512):
             x0, y0, s = adaptive_bbox(k)
             vis = k[:, 2] > 0.05
             xs = (k[vis, 0] - x0) / s
-            ys = 1.0 - (k[vis, 1] - y0) / s  # flip once → correct orientation
+            ys = 1.0 - (k[vis, 1] - y0) / s
             for xx, yy in zip(xs, ys):
                 cx, cy = int(xx * (L - 1)), int(yy * (L - 1))
                 cv2.circle(canvas, (cx, cy), 5, (0, 0, 255), -1)
-
         vw.write(canvas)
     vw.release()
     print(f"🦴  stickman → {dst}")
 
-
-# ───────────────────── diagnostic plot ───────────────────────
 def plot_series(sides: np.ndarray, png: str | Path):
     keep, S_star, smooth = compute_stable_side(sides)
-
     plt.figure(figsize=(10, 4))
     plt.plot(sides, lw=1.0, label="raw")
     plt.scatter(np.where(~keep), sides[~keep], s=8, c="red",   label="discarded")
@@ -143,8 +135,6 @@ def plot_series(sides: np.ndarray, png: str | Path):
     plt.savefig(png, dpi=150); plt.close()
     print(f"📊  plot → {png}")
 
-
-# ───────────────────────────── CLI ────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--alphapose", required=True)
@@ -161,7 +151,6 @@ def main():
         stickman_video(kps, args.stickman)
     if args.plot:
         plot_series(sides, args.plot)
-
 
 if __name__ == "__main__":
     main()

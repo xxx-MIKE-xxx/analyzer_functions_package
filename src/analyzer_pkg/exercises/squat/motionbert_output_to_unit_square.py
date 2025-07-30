@@ -30,7 +30,7 @@ def _normalise(kps: np.ndarray, bbox: Tuple[float, float, float]) -> np.ndarray:
         return out
     valid = (out[:, 2] > 0.05) if out.shape[1] == 3 else ~np.isnan(out[:, 0])
     out[valid, 0] = (out[valid, 0] - xmin) / side
-    out[valid, 1] = (out[valid, 1] - ymin) / side
+    out[valid, 1] = 1.0 - (out[valid, 1] - ymin) / side
     return out
 
 # ── public API ───────────────────────────────────────────────────

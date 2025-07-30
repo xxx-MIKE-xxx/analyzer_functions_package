@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-squat_detector.py – 2-D hip-height repetition detector
-------------------------------------------------------
+squat_detector.py – 2‑D hip‑height repetition detector (unit‑square version)
+----------------------------------------------------------------------------
 
-Assumes unit-square key-points with (0,0)=top-left  (y grows downwards).
+Assumes unit‑square keypoints with (0,0)=bottom-left and y grows upwards.
 
 Public API
 ----------
 detect_repetitions_threshold(...)   # low-level core
 pipeline(...)                       # convenience → pandas.DataFrame
 """
+
 from __future__ import annotations
 import argparse
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Sequence, List, Dict, Tuple
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
-
+import matplotlib.pyplot as plt
 
 def detect_repetitions_threshold(
     hip_y: Sequence[float],
@@ -30,7 +31,7 @@ def detect_repetitions_threshold(
     depth_ratio:    float = 0.30,
     min_distance:   int   = 3,
     prominence:     float = 1e-4,
-) -> Tuple[List[Dict], float, float]:
+) -> Tuple[List[Dict], float, float, np.ndarray, np.ndarray]:
     """
     Detect squat reps by looking for ‘valleys’ in hip-Y.
 
@@ -39,9 +40,11 @@ def detect_repetitions_threshold(
     reps          : list of dicts {rep_id, rep_start, rep_mid, rep_end}
     depth_thresh  : float  (in depth units)
     stand_thresh  : float  (in depth units)
+    depth         : full depth vector for plotting
+    seg           : segment used for detection (depth[start:end+1])
     """
     # ❶ Build a ‘depth’ signal: 0 at standing frame; positive = deeper
-    depth = hip_y - hip_y_ref
+    depth = hip_y_ref - hip_y   # FLIPPED SIGN (y decreases as you squat down)
     seg   = depth[start_frame : end_frame + 1]
 
     # ❷ Compute thresholds from the empirical max depth
@@ -57,7 +60,7 @@ def detect_repetitions_threshold(
     )
     deep_mid = [m for m in cand_mid if seg[m] >= depth_thresh]
     if not deep_mid:
-        return [], depth_thresh, stand_thresh
+        return [], depth_thresh, stand_thresh, depth, seg
 
     # ❹ Enforce stand-up between dips
     deep_mid.sort()
@@ -92,8 +95,7 @@ def detect_repetitions_threshold(
         })
         rep_id += 1
 
-    return reps, depth_thresh, stand_thresh
-
+    return reps, depth_thresh, stand_thresh, depth, seg
 
 def pipeline(
     keypoints: str | Path | np.ndarray,
@@ -109,7 +111,7 @@ def pipeline(
     prominence:      float = 1e-4,
 ) -> pd.DataFrame:
     """
-    Convenience wrapper: returns DataFrame with columns
+    Returns DataFrame with columns
     ['rep_id','rep_start','rep_mid','rep_end'] even if no reps.
 
     Accepts optional ankle_ref_frame for backward compatibility:
@@ -138,7 +140,7 @@ def pipeline(
     hip_y_ref = hip_y[start_frame]
 
     # 4) detect
-    reps, depth_thr, stand_thr = detect_repetitions_threshold(
+    reps, depth_thr, stand_thr, depth, seg = detect_repetitions_threshold(
         hip_y, hip_y_ref,
         start_frame, end_frame,
         standing_ratio=standing_ratio,
@@ -149,8 +151,28 @@ def pipeline(
 
     # 5) return DataFrame with fixed columns
     cols = ["rep_id","rep_start","rep_mid","rep_end"]
-    return pd.DataFrame(reps, columns=cols)
+    return pd.DataFrame(reps, columns=cols), depth, reps, seg
 
+def plot_reps(depth: np.ndarray, reps: List[Dict], out: Path):
+    """
+    Plot hip-height vs frame, with rep start/mid/end markers.
+    """
+    plt.figure(figsize=(12,5))
+    plt.plot(depth, label="hip height signal (depth)", lw=1.5)
+    for rep in reps:
+        s, m, e = rep['rep_start'], rep['rep_mid'], rep['rep_end']
+        plt.axvspan(s, e, color='yellow', alpha=0.2)
+        plt.plot([m], [depth[m]], 'ro', label="rep mid" if rep['rep_id']==1 else None)
+        plt.plot([s], [depth[s]], 'go', label="rep start" if rep['rep_id']==1 else None)
+        plt.plot([e], [depth[e]], 'bo', label="rep end" if rep['rep_id']==1 else None)
+    plt.title("Detected squat repetitions: hip height vs. frame")
+    plt.xlabel("Frame")
+    plt.ylabel("Depth (hip_y_ref – hip_y)")
+    plt.legend(loc='upper right')
+    plt.tight_layout()
+    plt.savefig(out, dpi=160)
+    plt.close()
+    print(f"📈 Saved plot to {out}")
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Detect squat repetitions")
@@ -163,9 +185,10 @@ def main() -> None:
     p.add_argument("--depth_ratio",    type=float, default=0.30)
     p.add_argument("--min_distance",   type=int,   default=3)
     p.add_argument("--prominence",     type=float, default=1e-4)
+    p.add_argument("--plot", type=Path, default=None, help="If set, outputs a plot of detected reps here")
     args = p.parse_args()
 
-    df = pipeline(
+    df, depth, reps, seg = pipeline(
         keypoints=args.input,
         ankle_ref_frame=args.ankle_ref_frame,
         standing_ratio=args.standing_ratio,
@@ -176,6 +199,8 @@ def main() -> None:
     df.to_csv(args.output, index=False)
     print("Saved →", args.output)
 
+    if args.plot:
+        plot_reps(depth, reps, args.plot)
 
 if __name__ == "__main__":
     main()

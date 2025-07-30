@@ -118,8 +118,13 @@ def run_pipeline(
     json_3d, json_2d = json.dumps(len3d), json.dumps(len2d)
 
     slf.pipeline(skel_3d, json.loads(json_3d))
-
-    df_reps  = sd.pipeline(keypoints=imputed, start_frame=ref_frame)
+    plot_png = run_dir / "hip_height_reps.png"
+    df_reps, depth_vec, rep_list, _ = sd.pipeline(
+         keypoints=imputed,
+         start_frame=ref_frame,
+    )
+    sd.plot_reps(depth_vec, rep_list, plot_png)
+    _mirror(plot_png, outdir)
     df_ffpa  = ikn.pipeline(imputed, df_reps, output_csv=outdir / "ffpa_report.csv")
     df_heel  = hra.pipeline(imputed, df_reps)
     df_fk    = fka.pipeline(imputed, df_reps, lengths_json=json_2d)
