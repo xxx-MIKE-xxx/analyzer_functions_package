@@ -1,5 +1,5 @@
 *.egg-info/
-
+.DS_Store
 # Ignore Python caches
 __pycache__/
 *.csv
