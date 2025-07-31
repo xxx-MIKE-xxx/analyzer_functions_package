@@ -104,6 +104,7 @@ ap.add_argument("--exercise", default="squat", help="exercise name")
 ap.add_argument("--jobdir", help="where to store artefacts")
 ap.add_argument("--no-copy", action="store_true",
                 help="assume <jobdir>/src.mp4 already exists")
+ap.add_argument("--debug", action="store_true")
 args = ap.parse_args()
 
 jobdir = Path(args.jobdir or f"/tmp/video_pose_{int(datetime.now().timestamp())}"
@@ -142,6 +143,7 @@ with app.app_context():
                                   / "models" / "rf_badframe_detector.joblib",
         outdir                  = jobdir / "analysis",
         exercise                = args.exercise,
+        debug                 = args.debug,
     ).get_json()
 
 # ───────────── Persist results ───────────────────────────────────

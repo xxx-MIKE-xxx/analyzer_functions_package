@@ -16,7 +16,7 @@ from __future__ import annotations
 import math, json
 from pathlib import Path
 from typing import Mapping
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -31,6 +31,72 @@ CONF_TH = 0.0                     # keypoint confidence threshold
 SEVERE_TH, MILD_TH = 20.0, 10.0   # angle thresholds (deg)
 
 
+
+
+
+
+def plot_forward_knees(
+    keypoints: np.ndarray,
+    reps: pd.DataFrame,
+    out_path: str | Path,
+    lengths_json: str | Path | dict = None,
+):
+    """
+    Plot per-frame forward knee angle for each rep.
+    One line for left knee, one for right.
+    """
+    # Load lengths as in build_report
+    if lengths_json is None:
+        raise ValueError("Must supply lengths_json for plotting")
+    if isinstance(lengths_json, dict):
+        lengths = lengths_json
+    else:
+        txt = str(lengths_json).strip()
+        from pathlib import Path
+        import json
+        if not (txt.startswith("{") and txt.endswith("}")):
+            with open(txt) as f:
+                raw = json.load(f)
+        else:
+            raw = json.loads(txt)
+        lengths = {
+            (int(a), int(b)): float(v)
+            for k, v in raw.items()
+            for a, b in [k if isinstance(k, (list, tuple))
+                         else map(int, str(k).strip("()").split(","))]
+        }
+
+    L_KNEE, R_KNEE = 13, 14
+    L_ANKLE, R_ANKLE = 15, 16
+
+    left_angles, right_angles, frame_nums = [], [], []
+
+    if {"rep_start", "rep_end"}.issubset(reps.columns):
+        reps = reps.rename(columns={"rep_start": "start", "rep_end": "end"})
+
+    for _, rep in reps.iterrows():
+        start, end = int(rep.start), int(rep.end)
+        for f in range(start, end + 1):
+            kp = keypoints[f]
+            θL, okL = _knee_forward_angle(kp, L_KNEE, L_ANKLE, lengths.get((L_KNEE, L_ANKLE), 0.0))
+            θR, okR = _knee_forward_angle(kp, R_KNEE, R_ANKLE, lengths.get((R_KNEE, R_ANKLE), 0.0))
+            left_angles.append(θL if okL else np.nan)
+            right_angles.append(θR if okR else np.nan)
+            frame_nums.append(f)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frame_nums, left_angles, label="Left knee angle (deg)", lw=1.2)
+    plt.plot(frame_nums, right_angles, label="Right knee angle (deg)", lw=1.2)
+    plt.xlabel("Frame")
+    plt.ylabel("Knee forward angle (degrees)")
+    plt.title("Forward Knee Angle Per Frame")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📈  Saved forward-knee plot → {out_path}")
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------

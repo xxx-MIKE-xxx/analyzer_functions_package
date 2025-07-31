@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
-squat_detector.py – 2‑D hip‑height repetition detector (unit‑square version)
-----------------------------------------------------------------------------
-
-Assumes unit‑square keypoints with (0,0)=bottom-left and y grows upwards.
-
-Public API
-----------
-detect_repetitions_threshold(...)   # low-level core
-pipeline(...)                       # convenience → pandas.DataFrame
+squat_detector.py – 2‑D hip‑height repetition detector (unit‑square, y‑up)
 """
 
 from __future__ import annotations
@@ -21,186 +13,152 @@ import pandas as pd
 from scipy.signal import find_peaks
 import matplotlib.pyplot as plt
 
+RIGHT_HIP, LEFT_HIP = 11, 12
+
+# ------------------------------------------------------------------
+def inspect_frames(arr: np.ndarray,
+                   *,
+                   frames: list[int] | None = None,
+                   out_video: Path | None = None,
+                   fps: int = 30) -> None:
+    # Stub – not used in headless/driver mode
+    pass
+
+# ───────────────────── detection core ─────────────────────────────
 def detect_repetitions_threshold(
     hip_y: Sequence[float],
     hip_y_ref: float,
     start_frame: int,
     end_frame: int,
     *,
-    standing_ratio: float = 0.70,
-    depth_ratio:    float = 0.30,
+    standing_ratio: float = 0.75,
+    depth_ratio:    float = 0.65,
     min_distance:   int   = 3,
     prominence:     float = 1e-4,
+    refine_delta:   float = 0.001,
 ) -> Tuple[List[Dict], float, float, np.ndarray, np.ndarray]:
-    """
-    Detect squat reps by looking for ‘valleys’ in hip-Y.
+    stand_thr = hip_y_ref * standing_ratio
+    depth_thr = hip_y_ref * depth_ratio
+    hip_seg = np.asarray(hip_y[start_frame:end_frame + 1])
 
-    Returns
-    -------
-    reps          : list of dicts {rep_id, rep_start, rep_mid, rep_end}
-    depth_thresh  : float  (in depth units)
-    stand_thresh  : float  (in depth units)
-    depth         : full depth vector for plotting
-    seg           : segment used for detection (depth[start:end+1])
-    """
-    # ❶ Build a ‘depth’ signal: 0 at standing frame; positive = deeper
-    depth = hip_y_ref - hip_y   # FLIPPED SIGN (y decreases as you squat down)
-    seg   = depth[start_frame : end_frame + 1]
+    mids, _ = find_peaks(-hip_seg, distance=min_distance, prominence=prominence)
+    mids = [m for m in mids if hip_seg[m] <= depth_thr]
+    if not mids:
+        return [], depth_thr, stand_thr, np.asarray(hip_y), hip_seg
 
-    # ❷ Compute thresholds from the empirical max depth
-    max_d = seg.max() if seg.size>0 else 0.0
-    depth_thresh = max_d * depth_ratio
-    stand_thresh = max_d * standing_ratio
-
-    # ❸ Find candidate mids = peaks of ‘depth’
-    cand_mid, _ = find_peaks(
-        seg,
-        distance=min_distance,
-        prominence=prominence
-    )
-    deep_mid = [m for m in cand_mid if seg[m] >= depth_thresh]
-    if not deep_mid:
-        return [], depth_thresh, stand_thresh, depth, seg
-
-    # ❹ Enforce stand-up between dips
-    deep_mid.sort()
-    valid_mid = [deep_mid[0]]
-    for m in deep_mid[1:]:
-        prev = valid_mid[-1]
-        if seg[prev:m+1].min() <= stand_thresh:
-            valid_mid.append(m)
-
-    # ❺ Locate boundaries and filter short dips
-    reps = []
+    reps: List[Dict] = []
     rep_id = 1
-    for mid in valid_mid:
-        # find start
+    for mid in mids:
         s = mid
-        while s > 0 and seg[s] >= depth_thresh:
-            s -= 1
-        s += 1
-        # find end (½ stand threshold)
+        while s > 0 and hip_seg[s] < stand_thr: s -= 1
+        while s + 1 < mid and hip_seg[s + 1] >= hip_seg[s]: s += 1
         e = mid
-        half_stand = stand_thresh * 0.5
-        while e < len(seg)-1 and seg[e] > half_stand:
-            e += 1
-        # skip too-short
-        if (e - s + 1) < 5:
+        while e < len(hip_seg) - 1 and hip_seg[e] < stand_thr: e += 1
+        while e - 1 > mid and hip_seg[e - 1] >= hip_seg[e]: e -= 1
+
+        # ----------- NEW LOGIC: refine start/end using derivative ----------
+        # Back up from s to earliest point with slope < -delta (keep falling fast)
+        s_ref = s
+        while s_ref > 0 and (hip_seg[s_ref] - hip_seg[s_ref-1]) < -refine_delta:
+            s_ref -= 1
+        # Forward from e to latest point with slope > +delta (keep rising fast)
+        e_ref = e
+        while e_ref < len(hip_seg) - 1 and (hip_seg[e_ref+1] - hip_seg[e_ref]) > refine_delta:
+            e_ref += 1
+
+        if (e_ref - s_ref) < 5:
             continue
-        reps.append({
-            "rep_id":    rep_id,
-            "rep_start": s + start_frame,
-            "rep_mid":   mid + start_frame,
-            "rep_end":   e + start_frame,
-        })
+        reps.append(dict(rep_id=rep_id,
+                         rep_start=s_ref + start_frame,
+                         rep_mid=mid + start_frame,
+                         rep_end=e_ref + start_frame))
         rep_id += 1
+    return reps, depth_thr, stand_thr, np.asarray(hip_y), hip_seg
 
-    return reps, depth_thresh, stand_thresh, depth, seg
-
+# ───────────────────────── pipeline ───────────────────────────────
 def pipeline(
     keypoints: str | Path | np.ndarray,
     *,
-    ankle_ref_frame: int | None = None,
-    right_hip_idx:   int = 11,
-    left_hip_idx:    int = 12,
-    start_frame:     int | None = None,
-    end_frame:       int | None = None,
-    standing_ratio:  float = 0.70,
-    depth_ratio:     float = 0.30,
-    min_distance:    int   = 3,
-    prominence:      float = 1e-4,
-) -> pd.DataFrame:
-    """
-    Returns DataFrame with columns
-    ['rep_id','rep_start','rep_mid','rep_end'] even if no reps.
-
-    Accepts optional ankle_ref_frame for backward compatibility:
-    if provided and start_frame=None, uses that as start_frame.
-    """
-    # 1) load ndarray
+    right_hip_idx: int = RIGHT_HIP,
+    left_hip_idx : int = LEFT_HIP,
+    start_frame:  int | None = None,
+    end_frame:    int | None = None,
+    **kwargs,
+) -> Tuple[pd.DataFrame, np.ndarray, List[Dict], np.ndarray, np.ndarray]:
     if isinstance(keypoints, (str, Path)):
         keypoints = np.load(keypoints)
     F = keypoints.shape[0]
+    if start_frame is None: start_frame = 0
+    if end_frame is None:   end_frame   = F - 1
 
-    # 2) determine start/end
-    if ankle_ref_frame is not None and start_frame is None:
-        start_frame = ankle_ref_frame
-    if start_frame is None:
-        start_frame = 0
-    if end_frame is None:
-        end_frame = F - 1
-    if not (0 <= start_frame <= end_frame < F):
-        raise ValueError("Invalid start_frame/end_frame")
+    hip_y = (keypoints[:, right_hip_idx, 1] +
+             keypoints[:, left_hip_idx, 1]) / 2.0
+    hip_ref = hip_y[start_frame]
 
-    # 3) build hip_Y
-    hip_y = (
-        keypoints[:, right_hip_idx, 1] +
-        keypoints[:, left_hip_idx, 1]
-    ) / 2.0
-    hip_y_ref = hip_y[start_frame]
+    df_reps, depth_thr, stand_thr, hip_full, hip_seg = \
+        detect_repetitions_threshold(
+            hip_y, hip_ref, start_frame, end_frame, **kwargs)
 
-    # 4) detect
-    reps, depth_thr, stand_thr, depth, seg = detect_repetitions_threshold(
-        hip_y, hip_y_ref,
-        start_frame, end_frame,
-        standing_ratio=standing_ratio,
-        depth_ratio=depth_ratio,
-        min_distance=min_distance,
-        prominence=prominence,
-    )
+    df = pd.DataFrame(df_reps, columns=["rep_id", "rep_start", "rep_mid", "rep_end"])
+    return df, hip_full, df_reps, hip_seg, hip_full
 
-    # 5) return DataFrame with fixed columns
-    cols = ["rep_id","rep_start","rep_mid","rep_end"]
-    return pd.DataFrame(reps, columns=cols), depth, reps, seg
+# ───────────────────────── plotting helper ────────────────────────
+def plot_hipy(hip_y: np.ndarray,
+              reps: List[Dict],
+              stand_thr: float,
+              depth_thr: float,
+              out: Path) -> None:
+    """Save hip‑height‑vs‑frame PNG with rep highlights."""
+    plt.figure(figsize=(12, 5))
+    plt.plot(hip_y, lw=1.3, label="hip_y (y‑up, 0=bottom)")
 
-def plot_reps(depth: np.ndarray, reps: List[Dict], out: Path):
-    """
-    Plot hip-height vs frame, with rep start/mid/end markers.
-    """
-    plt.figure(figsize=(12,5))
-    plt.plot(depth, label="hip height signal (depth)", lw=1.5)
+    plt.axhline(stand_thr, color="green", ls="--", lw=1, label="standing 75 %")
+    plt.axhline(depth_thr, color="red",   ls="--", lw=1, label="depth 65 %")
     for rep in reps:
-        s, m, e = rep['rep_start'], rep['rep_mid'], rep['rep_end']
-        plt.axvspan(s, e, color='yellow', alpha=0.2)
-        plt.plot([m], [depth[m]], 'ro', label="rep mid" if rep['rep_id']==1 else None)
-        plt.plot([s], [depth[s]], 'go', label="rep start" if rep['rep_id']==1 else None)
-        plt.plot([e], [depth[e]], 'bo', label="rep end" if rep['rep_id']==1 else None)
-    plt.title("Detected squat repetitions: hip height vs. frame")
-    plt.xlabel("Frame")
-    plt.ylabel("Depth (hip_y_ref – hip_y)")
-    plt.legend(loc='upper right')
-    plt.tight_layout()
-    plt.savefig(out, dpi=160)
-    plt.close()
-    print(f"📈 Saved plot to {out}")
+        s, m, e = rep["rep_start"], rep["rep_mid"], rep["rep_end"]
+        plt.axvspan(s, e, color="yellow", alpha=0.25)
+        plt.plot([s], [hip_y[s]], "go"); plt.plot([m], [hip_y[m]], "ro")
+        plt.plot([e], [hip_y[e]], "bo")
 
+    plt.title("Hip height over time")
+    plt.xlabel("Frame"); plt.ylabel("hip_y (unit square)")
+    plt.legend(loc="best"); plt.tight_layout()
+    plt.savefig(out, dpi=160); plt.close()
+    print(f"📉  Saved hip‑height plot → {out}")
+
+# ------------------------------------------------------------------
+def save_hip_height_plot(hip_y: np.ndarray,
+                         reps: List[Dict],
+                         out_path: Path) -> None:
+    """Wrapper used by the driver."""
+    if reps:
+        stand_thr = hip_y[reps[0]["rep_start"]]
+    else:
+        stand_thr = hip_y[0]
+    depth_thr = hip_y.min()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plot_hipy(hip_y, reps, stand_thr, depth_thr, out_path)
+
+# ───────────────────── CLI for standalone testing ────────────────
 def main() -> None:
-    p = argparse.ArgumentParser(description="Detect squat repetitions")
-    p.add_argument("--input",  required=True, type=Path,
-                   help="Input .npy keypoints (F,K,3)")
-    p.add_argument("--output", default="reps.csv", type=Path)
-    p.add_argument("--ankle_ref_frame", type=int, default=None,
-                   help="Optional frame to use for baseline")
-    p.add_argument("--standing_ratio", type=float, default=0.70)
-    p.add_argument("--depth_ratio",    type=float, default=0.30)
-    p.add_argument("--min_distance",   type=int,   default=3)
-    p.add_argument("--prominence",     type=float, default=1e-4)
-    p.add_argument("--plot", type=Path, default=None, help="If set, outputs a plot of detected reps here")
-    args = p.parse_args()
+    ap = argparse.ArgumentParser("Squat repetition detector / debugger")
+    ap.add_argument("--input", required=True, type=Path)
+    ap.add_argument("--output", default="reps.csv", type=Path)
+    ap.add_argument("--plot",   default=None, help="Save hip_y plot PNG")
+    ap.add_argument("--inspect",
+                    help="Comma‑separated frames to visualise instead of detection")
+    args = ap.parse_args()
 
-    df, depth, reps, seg = pipeline(
-        keypoints=args.input,
-        ankle_ref_frame=args.ankle_ref_frame,
-        standing_ratio=args.standing_ratio,
-        depth_ratio=args.depth_ratio,
-        min_distance=args.min_distance,
-        prominence=args.prominence,
-    )
+    if args.inspect:
+        # Disabled GUI/interactive
+        return
+
+    df, hip_y, reps, _, _ = pipeline(args.input)
     df.to_csv(args.output, index=False)
-    print("Saved →", args.output)
+    print("✅  Repetitions →", args.output)
 
     if args.plot:
-        plot_reps(depth, reps, args.plot)
+        save_hip_height_plot(hip_y, reps, Path(args.plot))
 
 if __name__ == "__main__":
     main()

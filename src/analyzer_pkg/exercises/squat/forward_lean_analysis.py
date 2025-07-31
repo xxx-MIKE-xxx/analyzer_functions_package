@@ -31,7 +31,7 @@ from __future__ import annotations
 import argparse, json, math, os
 from pathlib import Path
 from typing import Dict, List, Mapping, Union
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -45,6 +45,71 @@ CONF_TH_DEF = 0.20       # default confidence
 SCALE       = 1000.0     # up-scale to kill 0-1 rounding errors
 MILD_TH     = 45.0       # >45° ⇒ mild lean
 SEV_TH      = 55.0       # >55° ⇒ severe lean
+
+
+
+
+
+def plot_forward_lean(
+    keypoints: np.ndarray,
+    reps: pd.DataFrame,
+    out_path: str | Path,
+    lengths_json: str | Path | dict = None,
+    window: int = 5,
+):
+    """
+    Plot per-frame forward-lean angle with mild/severe threshold lines.
+    """
+    # Thresholds from your constants
+    MILD_TH = 45.0
+    SEV_TH  = 55.0
+
+    # Lengths
+    if lengths_json is None:
+        raise ValueError("`lengths_json` is required for plotting.")
+    if isinstance(lengths_json, dict):
+        lens = _normalize_lengths(lengths_json)
+    else:
+        txt = str(lengths_json).strip()
+        lens = (
+            _normalize_lengths(json.loads(txt)) if txt.startswith("{")
+            else _normalize_lengths(json.load(open(txt)))
+        )
+
+    # Prepare
+    if "rep_mid" in reps.columns and "mid" not in reps.columns:
+        reps = reps.rename(columns={"rep_mid": "mid"})
+
+    frame_nums = []
+    angles = []
+
+    for _, row in reps.iterrows():
+        mid = int(row.mid)
+        sign = _orientation_sign(keypoints, mid)
+        frames = range(max(0, mid - window), min(keypoints.shape[0], mid + window + 1))
+        for f in frames:
+            a = _frame_deviation(keypoints[f], lens, sign)
+            if not math.isnan(a):
+                frame_nums.append(f)
+                angles.append(a)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frame_nums, angles, label="Torso deviation from vertical (deg)", lw=1.5)
+    plt.axhline(MILD_TH, color="orange", ls="--", lw=1.5, label="Mild threshold (45°)")
+    plt.axhline(SEV_TH, color="red", ls="--", lw=1.5, label="Severe threshold (55°)")
+    plt.xlabel("Frame")
+    plt.ylabel("Torso angle from vertical (degrees)")
+    plt.title("Forward Lean Angle Over Frames")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📈  Saved forward-lean plot → {out_path}")
+
+
+
 
 # ------------------------------------------------------------------ helpers
 def _get_len(pairs: Mapping[str, float], i: int, j: int) -> float | None:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse, json, math, os
 from pathlib import Path
 from typing import Dict, List, Mapping, Union
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -39,6 +39,71 @@ SCALE         = 1000.0    # coordinate up-scaling factor
 HIP_MILD_TH   = 0.02      # hip depth ≤ 2 % of frame → mild
 KNEE_MILD_TH  = 85.0      # angle > 85°  → mild
 KNEE_SEV_TH   = 95.0      # angle > 95°  → severe
+
+
+
+
+
+def plot_squat_depth(
+    keypoints: np.ndarray,
+    reps: pd.DataFrame,
+    out_path: str | Path,
+    lengths_json: str | Path | dict = None,
+    conf_thresh: float = 0.0,
+):
+    """
+    Plot per-frame squat depth (hip below knee = positive).
+    Includes mild/severe thresholds as horizontal lines.
+    """
+    # Parse lens as in pipeline()
+    if lengths_json is None:
+        raise ValueError("`lengths_json` is required for plotting.")
+    if isinstance(lengths_json, dict):
+        lens = _normalize_lengths(lengths_json)
+    else:
+        txt = str(lengths_json).strip()
+        lens = (
+            _normalize_lengths(json.loads(txt)) if txt.startswith("{")
+            else _normalize_lengths(json.load(open(txt)))
+        )
+
+    # Constants (for thresholds)
+    HIP_MILD_TH = 0.02  # Mild threshold (positive = hip below knee)
+    # Collect hip depth for each frame in each rep
+    if "rep_mid" in reps.columns and "mid" not in reps.columns:
+        reps = reps.rename(columns={"rep_mid": "mid"})
+
+    frame_nums = []
+    hip_depths = []
+
+    for _, row in reps.iterrows():
+        mid = int(row.mid)
+        sign = _sign_orientation(keypoints, mid)
+        win = range(max(0, mid - 5), min(keypoints.shape[0], mid + 6))
+        for f in win:
+            fkp = keypoints[f]
+            for side, (h, k, a) in JOINTS.items():
+                if any(fkp[idx, 2] < conf_thresh for idx in (h, k, a)):
+                    continue
+                hip_y, knee_y = fkp[h, 1], fkp[k, 1]
+                depth = sign * (hip_y - knee_y)  # +ve ⇒ hip lower than knee
+                hip_depths.append(depth)
+                frame_nums.append(f)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frame_nums, hip_depths, label="Hip depth (hip-knee)", lw=1.3)
+    plt.axhline(0.0, color="red", ls="--", lw=1, label="Severe (hip not below knee)")
+    plt.axhline(HIP_MILD_TH, color="orange", ls="--", lw=1, label="Mild threshold")
+    plt.xlabel("Frame")
+    plt.ylabel("Hip depth (unit square)")
+    plt.title("Hip Depth Below Knee Over Frames (Squat Depth)")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📈  Saved squat-depth plot → {out_path}")
 
 
 # --------------------------------------------------------------------------

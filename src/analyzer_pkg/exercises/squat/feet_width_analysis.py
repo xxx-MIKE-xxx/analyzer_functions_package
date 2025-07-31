@@ -30,13 +30,65 @@ import math
 import os
 from pathlib import Path
 from typing import Dict, List, Union
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 # ------------------------------------------------------------------ HALPE-26 indices
 L_HIP, R_HIP = 11, 12
 L_ANK, R_ANK = 15, 16
+
+
+
+
+def plot_feet_width(
+    keypoints: np.ndarray,
+    reps: pd.DataFrame,
+    out_path: str | Path,
+):
+    """
+    Plot stance width ratio (feet/hip) per frame, with severity thresholds.
+    """
+    # Thresholds (must match analysis)
+    SEVERE_TH = 0.90
+    MILD_TH = 1.00
+
+    # Indexes (HALPE-26)
+    L_HIP, R_HIP = 11, 12
+    L_ANK, R_ANK = 15, 16
+
+    frame_nums = []
+    ratios = []
+
+    # Standardize columns
+    if {"rep_start", "rep_end"}.issubset(reps.columns):
+        reps = reps.rename(columns={"rep_start": "start", "rep_end": "end"})
+
+    for _, row in reps.iterrows():
+        start, end = int(row.start), int(row.end)
+        for f in range(start, end + 1):
+            feet_d = np.linalg.norm(keypoints[f, L_ANK, :2] - keypoints[f, R_ANK, :2])
+            hip_d  = np.linalg.norm(keypoints[f, L_HIP, :2] - keypoints[f, R_HIP, :2])
+            ratio  = feet_d / hip_d if hip_d > 0 else float("nan")
+            frame_nums.append(f)
+            ratios.append(ratio)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frame_nums, ratios, label="Feet/Hip width ratio", lw=1.5)
+    plt.axhline(SEVERE_TH, color="red", ls="--", lw=1.5, label="Severe threshold (0.90)")
+    plt.axhline(MILD_TH, color="orange", ls="--", lw=1.5, label="Mild threshold (1.00)")
+    plt.xlabel("Frame")
+    plt.ylabel("Width ratio (Feet/Hip)")
+    plt.title("Feet Width Ratio per Frame")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📉  Saved feet width plot → {out_path}")
+
+
 
 # ------------------------------------------------------------------ helpers
 def dist2d(pt1: np.ndarray, pt2: np.ndarray) -> float:

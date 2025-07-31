@@ -18,7 +18,10 @@ Change log (2025-07-06)
 * Guarded `_signed_dist` against zero-length hip-ankle vectors.
 * Updated CLI defaults/help accordingly.
 """
+
+
 from __future__ import annotations
+import matplotlib.pyplot as plt
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -50,6 +53,62 @@ def _signed_dist(pt: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> float:
         return 0.0
     perp = np.array([-v[1], v[0]]) / norm
     return float(np.dot(pt - p1, perp))
+
+
+
+
+def plot_knee_distances_over_time(
+    keypoints_array: np.ndarray,
+    out_path: str | Path,
+    left: bool = True,
+    right: bool = True,
+    frames: list[int] | None = None,
+    show_thresh: float = 0.05,
+):
+    """
+    Plots the signed (absolute) knee distance from the hip-ankle line vs time for each frame.
+
+    Parameters
+    ----------
+    keypoints_array : ndarray (F, 17, 2|3)
+    out_path        : PNG output path
+    left, right     : Plot left/right leg (default both)
+    frames          : If given, restrict to these frames only (otherwise all)
+    show_thresh     : Show threshold as horizontal line
+    """
+    kp2 = keypoints_array[..., :2]  # always 2D
+
+    if frames is None:
+        frames = list(range(len(kp2)))
+    frames = [f for f in frames if 0 <= f < len(kp2)]
+
+    dists_left, dists_right = [], []
+
+    for f in frames:
+        k = kp2[f]
+        # Left leg:  hip=11, knee=13, ankle=15
+        ldist = abs(_signed_dist(k[13], k[11], k[15]))
+        dists_left.append(ldist)
+        # Right leg: hip=12, knee=14, ankle=16
+        rdist = abs(_signed_dist(k[14], k[12], k[16]))
+        dists_right.append(rdist)
+
+    plt.figure(figsize=(12, 4))
+    if left:
+        plt.plot(frames, dists_left, label="Left knee distance", color="blue")
+    if right:
+        plt.plot(frames, dists_right, label="Right knee distance", color="red")
+    plt.axhline(show_thresh, color="gray", ls="--", lw=1, label=f"thresh={show_thresh}")
+    plt.xlabel("Frame")
+    plt.ylabel("Abs. knee distance from hip-ankle line (unit square)")
+    plt.title("Knee-to-line distance over time (left/right legs)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📉  Saved knee distances plot → {out_path}")
+
+
 
 
 def _fppa_outside(kp2: np.ndarray, side: str = "L") -> float:

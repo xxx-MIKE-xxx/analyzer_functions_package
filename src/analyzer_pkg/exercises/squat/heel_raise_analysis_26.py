@@ -22,7 +22,7 @@ Change log (2025-07-06)
 * `analyze_heel_raise_report` accepts a DataFrame or CSV path.
 """
 from __future__ import annotations
-
+import matplotlib.pyplot as plt
 import argparse
 import csv
 import json
@@ -55,6 +55,41 @@ def _median_y(
         if data[f, idx, 2] >= conf_thresh
     ]
     return float("nan") if not coords else float(np.median(coords))
+
+
+
+
+def plot_heel_raise(
+    keypoints: str | Path | np.ndarray,
+    out_path: str | Path,
+    *,
+    left_heel_idx: int = 24,
+    right_heel_idx: int = 25,
+) -> None:
+    """
+    Saves a plot of left/right heel Y-coordinates over all frames to out_path (PNG).
+    """
+    kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
+    F = kps.shape[0]
+
+    left_heel_y  = kps[:, left_heel_idx, 1]
+    right_heel_y = kps[:, right_heel_idx, 1]
+    frames = np.arange(F)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frames, left_heel_y,  label="Left Heel",  color="blue")
+    plt.plot(frames, right_heel_y, label="Right Heel", color="red")
+    plt.xlabel("Frame")
+    plt.ylabel("Heel Y position (unit square)")
+    plt.title("Heel Y-coordinates over time")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📉  Saved heel Y plot → {out_path}")
+
 
 
 def _first_lift_frame(

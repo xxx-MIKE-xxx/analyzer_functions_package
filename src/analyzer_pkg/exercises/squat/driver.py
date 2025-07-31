@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-full_pipeline_driver.py – single-entry script  (2025-07 hot-fix)
+full_pipeline_driver.py – single‑entry script  (2025‑07 hot‑fix)
 
 • Stores every artefact **both** in the scratch folder (`--out`) *and*
   in `/opt/analyzer/results/<exercise>_<rand>` for offline triage.
 
-• Skips the Random-Forest bad-frame detector – all frames are treated as
-  “good”, so the moving-average imputer works on raw key-points.
+• Skips the Random‑Forest bad‑frame detector – all frames are treated as
+  “good”, so the moving‑average imputer works on raw key‑points.
 
 • The final JSON report is now an **object** instead of a bare list
   (required by the Flutter feedback screen).
@@ -41,13 +41,32 @@ from . import (
 )
 from .compute_reference_lengths import pipeline_reference_lengths
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+def ensure_json_serializable(obj):
+    """Recursively convert NumPy numeric types to native Python types."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {ensure_json_serializable(k): ensure_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [ensure_json_serializable(i) for i in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
+
 app = Flask(__name__)   # only so we can return jsonify() in CLI mode
-# ════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 def _mirror(src: Path, dst_dir: Path) -> None:
     """Copy *src* into *dst_dir* (idempotent)."""
     if src.exists():
         dst_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst_dir / src.name)
+
 # ════════════════════════════════════════════════════════════════
 def run_pipeline(
     json_pose_path: str | Path,
@@ -56,8 +75,12 @@ def run_pipeline(
     model_path    : str | Path,   # kept for API stability – unused
     outdir        : str | Path,
     exercise      : str,
+    *,
+    inspect: str | None = None,          # NEW  e.g. "0,50,120"
+    inspect_out: str | None = None,      # NEW  optional .avi path
+    debug: bool = False,                 # NEW  enable extra plots
 ):
-    # ────────────── set-up folders ───────────────────────────────
+    # ────────────── set‑up folders ───────────────────────────────
     json_pose_path     = Path(json_pose_path)
     X3D_pose_path      = Path(X3D_pose_path)
     reference_skeleton = np.load(reference_skeleton_path)
@@ -79,7 +102,7 @@ def run_pipeline(
     _mirror(run_dir / "alphapose_results.npy", outdir)
     _mirror(run_dir / "alphapose-results.json", outdir)
 
-    # ────────────── 2. bad-frame mask (all good) ─────────────────
+    # ────────────── 2. bad‑frame mask (all good) ─────────────────
     bad_csv = run_dir / "bad_frames.csv"
     pd.DataFrame(
         {"frame": np.arange(alphapose.shape[0]), "is_bad": 0}
@@ -104,35 +127,69 @@ def run_pipeline(
         exercise_type=exercise,
         reference_type="file",
     )
-    skel_3d, _ = m3u.pipeline(          # <- returns (stable, adaptive)
+    skel_3d, _ = m3u.pipeline(
         skel_3d_raw,
         ref_idx    = ref_frame,
         out_stable = run_dir / "motionbert_scaled.npy",
     )
     _mirror(run_dir / "motionbert_scaled.npy", outdir)
 
+    # --- Scale 2D skeleton (imputed) to unit square, y‑up ----------
+    skel_2d_unit, _ = m3u.pipeline(
+        imputed,
+        ref_idx    = ref_frame,
+        out_stable = run_dir / "alphapose_scaled.npy",
+    )
+    _mirror(run_dir / "alphapose_scaled.npy", outdir)
 
+
+
+    # ────────────── reference lengths ─────────────────────────────
     len3d, len2d = pipeline_reference_lengths(
-        input_3d=skel_3d, input_2d=imputed, frames=str(ref_frame)
+            input_3d=skel_3d,
+            input_2d=skel_2d_unit,
+            frames=str(ref_frame)
     )
     json_3d, json_2d = json.dumps(len3d), json.dumps(len2d)
 
-    slf.pipeline(skel_3d, json.loads(json_3d))
-    plot_png = run_dir / "hip_height_reps.png"
-    df_reps, depth_vec, rep_list, _ = sd.pipeline(
-         keypoints=imputed,
-         start_frame=ref_frame,
+    # ➋ squat‑detector  (must receive y‑up skeleton)
+    df_reps, hip_y_full, rep_list, _, _ = sd.pipeline(
+            keypoints=skel_2d_unit,
+            start_frame=ref_frame,
     )
-    sd.plot_reps(depth_vec, rep_list, plot_png)
-    _mirror(plot_png, outdir)
-    df_ffpa  = ikn.pipeline(imputed, df_reps, output_csv=outdir / "ffpa_report.csv")
-    df_heel  = hra.pipeline(imputed, df_reps)
-    df_fk    = fka.pipeline(imputed, df_reps, lengths_json=json_2d)
-    df_depth = sda.pipeline(imputed, df_reps, lengths_json=json_2d)
-    df_lean  = fla.pipeline(imputed, df_reps, lengths_json=json_2d)
-    df_hip   = hpr.pipeline(imputed, df_reps, lengths_json=json_2d)
-    df_feet  = fwa.pipeline(imputed, df_reps)
 
+    
+
+
+    # ➌ downstream analyses
+    df_ffpa = ikn.pipeline(skel_2d_unit, df_reps, output_csv=outdir / "ffpa_report.csv")
+   
+
+    df_heel = hra.pipeline(skel_2d_unit, df_reps)
+
+
+    df_fk   = fka.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
+   
+
+    df_depth= sda.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
+    
+    df_lean = fla.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
+    
+    df_hip  = hpr.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
+    
+    df_feet = fwa.pipeline(skel_2d_unit, df_reps)
+    
+
+    if(debug):
+        sd.save_hip_height_plot(hip_y_full, rep_list, outdir / "debug_plots" / "hip_height_reps_after_detection.png")
+        ikn.plot_knee_distances_over_time(skel_2d_unit, outdir / "debug_plots" / "knee_distances_vs_time.png")
+        hra.plot_heel_raise(skel_2d_unit, outdir / "debug_plots" / "heel_raise_plot.png")
+        fka.plot_forward_knees(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_knees_plot.png", json_2d)
+        sda.plot_squat_depth(skel_2d_unit, df_reps, outdir / "debug_plots" / "squat_depth_plot.png", json_2d)
+        fla.plot_forward_lean(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_lean_plot.png", json_2d)
+        hpr.plot_hip_path(skel_2d_unit, df_reps, outdir / "debug_plots" / "hip_path_plot.png", json_2d)
+        fwa.plot_feet_width(skel_2d_unit, df_reps, outdir / "debug_plots" / "feet_width_plot.png")
+        
     def _tag(df: pd.DataFrame, tag: str) -> pd.DataFrame:
         return df.rename(columns={c: f"{tag}_{c}" for c in df.columns if c != "rep_id"})
 
@@ -156,33 +213,48 @@ def run_pipeline(
     # ────────────── 5. build FINAL report object ─────────────────
     report = {
         "mistakes": merged_df.to_dict(orient="records"),
-        "fps"     : 30,                # ↔ replace with real fps if needed
+        "fps"     : 30,
         "version" : "2025-07-06",
     }
+    report_serializable = ensure_json_serializable(report)
 
-    # main triage copy
     merged_json = run_dir / "merged_report.json"
-    merged_json.write_text(json.dumps(report, indent=2))
+    merged_json.write_text(json.dumps(report_serializable, indent=2))
 
-    # copy inside scratch → Celery will upload it
     squat_json = outdir / "squat_analysis.json"
-    squat_json.write_text(json.dumps(report, indent=2))
+    squat_json.write_text(json.dumps(report_serializable, indent=2))
 
-    # mirror both into scratch/persist dirs
-    _mirror(merged_json, outdir)  # convenience duplicate
+    _mirror(merged_json, outdir)
     _mirror(squat_json,   run_dir)
 
-    return jsonify(report)
+    return jsonify(report_serializable)
 
 # ════════════════════════════════════════════════════════════════
+
+
+
+
+
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser("Full squat-pipeline driver")
+    p = argparse.ArgumentParser("Full squat‑pipeline driver")
     p.add_argument("--json",   required=True, type=Path)
     p.add_argument("--x3d",    required=True, type=Path)
     p.add_argument("--ref3d",  required=True, type=Path)
     p.add_argument("--model",  default="rf_badframe_detector.joblib", type=Path)
     p.add_argument("--out",    default="outputs", type=Path)
     p.add_argument("--exercise", default="squat")
+
+    # NEW – optional inspection helpers
+    p.add_argument("--inspect",
+                   help="Comma‑separated frame numbers to visualise "
+                        "after scaling (e.g. 0,60,120)")
+    p.add_argument("--inspect-out",
+                   help="If given, save the inspection clip to this .avi "
+                        "instead of showing it live")
+    p.add_argument("--debug", action="store_true",
+                   help="Enable extra plots for debugging (e.g. knee distances, "
+                        "heel raise, etc.)")
+
     args = p.parse_args(argv)
 
     run_pipeline(
@@ -192,6 +264,9 @@ def main(argv: list[str] | None = None) -> None:
         model_path=args.model,
         outdir=args.out,
         exercise=args.exercise,
+        inspect=args.inspect,
+        inspect_out=args.inspect_out,
+        debug=args.debug,
     )
 
 if __name__ == "__main__":

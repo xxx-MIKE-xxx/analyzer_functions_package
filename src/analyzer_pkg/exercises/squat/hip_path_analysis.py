@@ -23,7 +23,7 @@ import math
 import os
 from pathlib import Path
 from typing import Dict, List, Union, Tuple, Mapping
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -43,6 +43,86 @@ MILD_TH    = 0.08
 
 # ---------------------------------------------------------------------
 # Helpers
+
+
+def plot_hip_path(
+    keypoints: np.ndarray,
+    reps: pd.DataFrame,
+    out_path: str | Path,
+    lengths_json: str | Path | dict = None,
+):
+    """
+    Plot hip-midpoint deviation ratio (absolute) over frames, with severity thresholds.
+    """
+    # Severity bands (must match core)
+    NONE_TH = 0.04
+    MILD_TH = 0.08
+
+    # Load leg length (same logic as pipeline)
+    if lengths_json is None:
+        raise ValueError("`lengths_json` is required (leg-length reference).")
+    if isinstance(lengths_json, dict):
+        raw = lengths_json
+        leg_len = (
+            sum((_get_len(raw, i, j) or _get_len(raw, j, i) or 0.0)
+                for i, j in [(L_HIP, L_KNEE), (R_HIP, R_KNEE), (L_KNEE, L_ANK), (R_KNEE, R_ANK)]) / 4.0 or 1.0
+        )
+    else:
+        txt = str(lengths_json).strip()
+        if txt.startswith("{"):
+            raw = json.loads(txt)
+            leg_len = (
+                sum((_get_len(raw, i, j) or _get_len(raw, j, i) or 0.0)
+                    for i, j in [(L_HIP, L_KNEE), (R_HIP, R_KNEE), (L_KNEE, L_ANK), (R_KNEE, R_ANK)]) / 4.0 or 1.0
+            )
+        else:
+            leg_len = load_leg_len(Path(txt))
+
+    # Prepare hip and ankle midpoints
+    hip_x = (keypoints[:, L_HIP, 0] + keypoints[:, R_HIP, 0]) / 2.0
+    hip_y = (keypoints[:, L_HIP, 1] + keypoints[:, R_HIP, 1]) / 2.0
+
+    frame_nums = []
+    dev_ratios = []
+
+    # Rep boundaries
+    if {"rep_start", "rep_end"}.issubset(reps.columns):
+        reps = reps.rename(columns={"rep_start": "start", "rep_end": "end"})
+
+    for _, row in reps.iterrows():
+        start = int(row.start)
+        end = int(row.end)
+        rng = np.arange(start, end + 1)
+        # ankle midpoint at start
+        A = (
+            (keypoints[start, L_ANK, 0] + keypoints[start, R_ANK, 0]) / 2.0,
+            (keypoints[start, L_ANK, 1] + keypoints[start, R_ANK, 1]) / 2.0
+        )
+        B = (hip_x[start], hip_y[start])
+
+        pts = np.column_stack((hip_x[rng], hip_y[rng]))
+        dev = signed_dist(pts, A, B)         # signed
+        dev_ratio = np.abs(dev / leg_len)    # absolute value for plotting
+
+        frame_nums.extend(rng.tolist())
+        dev_ratios.extend(dev_ratio.tolist())
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frame_nums, dev_ratios, label="|Hip-mid deviation / leg length|", lw=1.5)
+    plt.axhline(NONE_TH, color="orange", ls="--", lw=1.5, label="Mild threshold (0.04)")
+    plt.axhline(MILD_TH, color="red", ls="--", lw=1.5, label="Severe threshold (0.08)")
+    plt.xlabel("Frame")
+    plt.ylabel("Absolute deviation ratio")
+    plt.title("Hip Path Deviation Ratio Over Frames")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📈  Saved hip-path plot → {out_path}")
+
+
 
 def _get_len(pairs: Mapping[str, float], i: int, j: int) -> float | None:
     """Fetch raw-length under any '(i,j)' permutation."""
