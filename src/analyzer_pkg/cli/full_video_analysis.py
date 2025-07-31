@@ -17,7 +17,49 @@ import importlib.resources as res
 import numpy as np
 import pandas as pd
 from flask import Flask
+import subprocess
 
+
+# ───────────────────────── debugging ─────────────────────────
+def debug_tools_pipeline(jobdir, analysis_dir, exercise):
+    """
+    Run the debugging tools and save their outputs to analysis_dir/debug_plots.
+    """
+    debug_dir = analysis_dir / "debug_plots"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    # -------- 1. alphapose_bbox_overlay.py --------------
+    alphapose_json = jobdir / "alphapose" / "alphapose-results.json"
+    video_mp4      = jobdir / "src.mp4"
+    out_overlay    = debug_dir / "alphapose_overlay.mp4"
+    out_stickman   = debug_dir / "alphapose_stickman.mp4"
+    out_plot       = debug_dir / "alphapose_sidelengths.png"
+    alphapose_overlay_cmd = [
+        "python", "debug_tools/alphapose_bbox_overlay.py",
+        "--alphapose", str(alphapose_json),
+        "--video",     str(video_mp4),
+        "--out",       str(out_overlay),
+        "--stickman",  str(out_stickman),
+        "--plot",      str(out_plot)
+    ]
+    subprocess.run(alphapose_overlay_cmd, check=True)
+
+    # -------- 2. skeleton_overlay.py --------------------
+    skeleton_overlay_cmd = [
+        "python", "debug_tools/skeleton_overlay.py",
+        "--jobdir", str(jobdir),
+        "--out", str(debug_dir / "overlay_skeleton.mp4"),
+    ]
+    subprocess.run(skeleton_overlay_cmd, check=True)
+
+    # -------- 3. debug_skeleton_hip_y_overlay.py --------
+    alphapose_scaled = jobdir / "analysis" / f"{exercise}_imputed_ma.npy"
+    debug_hip_y_cmd = [
+        "python", "debug_tools/debug_skeleton_hip_y_overlay.py",
+        "--input", str(alphapose_scaled),
+        "--out",   str(debug_dir / "hip_y_overlay.avi"),
+    ]
+    subprocess.run(debug_hip_y_cmd, check=True)
 # ───────────────────────── configuration ─────────────────────────
 def _tool_dir(name: str) -> Path:
     here = Path(__file__).resolve().parent.parent  # …/analyzer_pkg/cli
@@ -165,6 +207,11 @@ LOG.info("   JSON : %s", json_path)
 LOG.info("   CSV  : %s", csv_path)
 LOG.info("   NPZ  : %s", npz_path)
 
+if args.debug:
+    LOG.info("🔍 running debugging tools")
+    debug_tools_pipeline(jobdir, analysis_dir, args.exercise)
+
+    LOG.info("📹  video overlay saved to %s", analysis_dir / "debug_plots")
 
 def main() -> None:           # required by setup.cfg / pyproject.toml
     """Wrapper so `full‑video‑analysis` can `import main`."""
