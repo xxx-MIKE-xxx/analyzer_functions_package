@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Interactive 3‑D skeleton viewer for MotionBERT outputs (H36M‑17 joints).
+Interactive 3-D skeleton viewer for MotionBERT outputs (H36M-17 joints).
 
-▸ Mouse   –  left‑drag = rotate,  middle‑drag = pan,  scroll = zoom
+▸ Mouse   –  left-drag = rotate,  middle-drag = pan,  scroll = zoom
 ▸ Keys    –  space      pause / resume
              ← / →      prev / next frame
-             + / ‑      faster / slower
+             + / -      faster / slower
              ↑ / ↓      tilt camera (small steps)
              , / .      pan camera
              q / ESC    quit
+
+Auto-orbits around the skeleton when playing.
 
 Usage
 -----
@@ -18,22 +20,24 @@ $ python debug_tools/skeleton_3d_viewer.py \
 """
 
 from __future__ import annotations
-import argparse, os, sys, itertools, warnings, math
+import argparse
+import os
+import warnings
 import numpy as np
 import matplotlib
 
 # ── backend fallback ───────────────────────────────────────────────
-try:                                   # try Qt first (best UX if present)
+try:
     matplotlib.use("Qt5Agg")
-except Exception:                      # Wayland / headless? → Tk
+except Exception:
     warnings.warn("⚠️  Qt backend unavailable – falling back to TkAgg")
     matplotlib.use("TkAgg")
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3‑D)
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3-D)
 
-# ── H36M‑17 skeleton definition ────────────────────────────────────
+# ── H36M-17 skeleton definition ────────────────────────────────────
 _JOINT_NAMES = [
     "root", "RHip", "RKnee", "RAnkle",
     "LHip", "LKnee", "LAnkle",
@@ -49,7 +53,7 @@ _EDGES = [  # (parent, child) pairs
     (8, 14), (14, 15), (15, 16),
 ]
 
-# ── helpers ────────────────────────────────────────────────────────
+
 def _load_motionbert_X3D(jobdir: str | os.PathLike) -> np.ndarray:
     """
     Accepts either
@@ -59,15 +63,15 @@ def _load_motionbert_X3D(jobdir: str | os.PathLike) -> np.ndarray:
     """
     mb_root = os.path.join(jobdir, "motionbert")
     path = os.path.join(mb_root, "3d-pose-results.npz")
-    if os.path.isdir(path):                        # new layout
+    if os.path.isdir(path):  # new layout
         x3d_path = os.path.join(path, "X3D.npy")
         if not os.path.exists(x3d_path):
             raise FileNotFoundError(f"missing {x3d_path}")
         poses = np.load(x3d_path)
-    elif os.path.isfile(path):                     # legacy .npz file
+    elif os.path.isfile(path):  # legacy .npz file
         poses = np.load(path)["X3D"]
     else:
-        raise FileNotFoundError(f"{path} (not a file nor dir)")
+        raise FileNotFoundError(f"{path} (not a file nor dir)")
     if poses.shape[1:] != (17, 3):
         raise ValueError(f"expected (T,17,3) but got {poses.shape}")
     return poses.astype(np.float32)
@@ -83,16 +87,15 @@ def _set_equal_aspect(ax: Axes3D, pts: np.ndarray) -> None:
         setter(m - max_range / 2, m + max_range / 2)
 
 
-# ── main viewer ────────────────────────────────────────────────────
 def launch_viewer(jobdir: str | os.PathLike, fps: int = 30) -> None:
-    poses = _load_motionbert_X3D(jobdir)            # (T,17,3)
+    poses = _load_motionbert_X3D(jobdir)  # (T,17,3)
     T = poses.shape[0]
 
-    fig = plt.figure("Skeleton 3‑D viewer")
+    fig = plt.figure("Skeleton 3-D viewer")
     ax = fig.add_subplot(111, projection="3d")
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
 
-    # draw once, then update data in‑place
+    # initial draw
     pts = poses[0]
     scat = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
                       s=40, c="red", depthshade=True)
@@ -105,11 +108,13 @@ def launch_viewer(jobdir: str | os.PathLike, fps: int = 30) -> None:
     ]
     _set_equal_aspect(ax, poses)
 
-    # ── interactive controls ───────────────────────────────────────
-    speed   = [1.0]   # mutable containers → editable inside closures
-    paused  = [False]
-    frame   = [0]
-    last_elev, last_azim = [ax.elev], [ax.azim]
+    # interaction state
+    speed = [1.0]
+    paused = [False]
+    frame = [0]
+
+    # auto orbit params
+    orbit_speed_deg_per_frame = 0.5  # degrees of azimuth per update
 
     def on_key(ev):
         if ev.key in (" ", "pause"):
@@ -135,11 +140,11 @@ def launch_viewer(jobdir: str | os.PathLike, fps: int = 30) -> None:
 
     fig.canvas.mpl_connect("key_press_event", on_key)
 
-    # → mouse drag track‑ball
-    drag_state = {"press": None}  # (x,y, elev, azim)
+    # mouse drag track-ball
+    drag_state = {"press": None}
 
     def on_press(ev):
-        if ev.inaxes != ax:      # ignore clicks outside the 3‑D axes
+        if ev.inaxes != ax:
             return
         drag_state["press"] = (ev.x, ev.y, ax.elev, ax.azim)
 
@@ -159,11 +164,14 @@ def launch_viewer(jobdir: str | os.PathLike, fps: int = 30) -> None:
     fig.canvas.mpl_connect("button_release_event", on_release)
     fig.canvas.mpl_connect("motion_notify_event", on_move)
 
-    # ── animation callback ─────────────────────────────────────────
+    # animation callback
     def update(_):
         if not paused[0]:
             frame[0] = (frame[0] + max(int(speed[0]), 1)) % T
+            # auto orbit: increment azimuth slightly
+            ax.view_init(elev=ax.elev, azim=ax.azim + orbit_speed_deg_per_frame)
         i = frame[0]
+        # update skeleton
         scat._offsets3d = (poses[i, :, 0],
                            poses[i, :, 1],
                            poses[i, :, 2])
@@ -173,17 +181,21 @@ def launch_viewer(jobdir: str | os.PathLike, fps: int = 30) -> None:
                            [poses[i, p, 2], poses[i, c, 2]])
         return [scat, *lines]
 
-    FuncAnimation(fig, update, interval=1000 / fps)
+    # keep animation object alive by assigning to a variable
+    ani = FuncAnimation(fig, update, interval=1000 / fps)
     plt.show()
 
+    # prevent garbage collection (if running in some embed contexts)
+    return ani
 
-# ── CLI ────────────────────────────────────────────────────────────
+
 def _main() -> None:
-    ap = argparse.ArgumentParser(description="3‑D skeleton viewer (H36M‑17)")
+    ap = argparse.ArgumentParser(description="3-D skeleton viewer (H36M-17)")
     ap.add_argument("--jobdir", required=True, help="job directory root")
     ap.add_argument("--fps", type=int, default=30,
                     help="playback fps (default 30)")
-    launch_viewer(**vars(ap.parse_args()))
+    args = ap.parse_args()
+    launch_viewer(**vars(args))
 
 
 if __name__ == "__main__":
