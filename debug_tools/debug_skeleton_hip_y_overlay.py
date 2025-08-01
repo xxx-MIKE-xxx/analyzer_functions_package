@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
 from tqdm import tqdm
+import matplotlib as mpl
+mpl.set_loglevel("error") 
 
 RIGHT_HIP = 11
 LEFT_HIP = 12

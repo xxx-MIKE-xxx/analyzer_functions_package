@@ -40,6 +40,8 @@ from . import (
     feet_width_analysis    as fwa,
 )
 from .compute_reference_lengths import pipeline_reference_lengths
+from .align_motionbert_to_alphapose import align_motionbert_sequence, evaluate_alignment_over_sequence
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,9 +131,25 @@ def run_pipeline(
         exercise_type=exercise,
         output_dir=None,
     )
+
+    skel_3d_aligned, M = align_motionbert_sequence(
+        kps2_all=alphapose,
+        kps3_all=skel_3d_raw,
+        robust=True,
+        rmse_thresh=5e-3,   # tweak if your pixel scale differs
+    )
+
+    np.save(run_dir / "motionbert_aligned.npy", skel_3d_aligned)
+    _mirror(run_dir / "motionbert_aligned.npy", outdir)
+
+    # Optional: compute per-frame RMSE diagnostics (in pixel units)
+    rmse_seq = evaluate_alignment_over_sequence(alphapose, skel_3d_aligned)
+    np.save(run_dir / "alignment_rmse.npy", rmse_seq)
+    _mirror(run_dir / "alignment_rmse.npy", outdir)
+    print(f"[INFO] Alignment RMSE: mean={np.nanmean(rmse_seq):.6f}, max={np.nanmax(rmse_seq):.6f}")
     
     skel_3d_unit, _ = m3u.pipeline(
-        skel_3d_raw,
+        skel_3d_aligned,
         ref_idx    = ref_frame,
         out_stable = run_dir / "motionbert_scaled.npy",
     )
