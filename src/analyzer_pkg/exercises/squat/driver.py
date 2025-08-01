@@ -122,12 +122,15 @@ def run_pipeline(
     skel_2d = convert.pipeline(alphapose)
     skel_3d_raw = kpf.pipeline(X3D_pose_path, kernel_size=5)
     ref_frame = rff.run_exercise_analysis(
-        skel_2d, skel_3d_raw,
+        file_2d=alphapose,
+        file_3d=None,
+        reference_type="file",
         reference_value=reference_skeleton,
         exercise_type=exercise,
-        reference_type="file",
+        output_dir=None,
     )
-    skel_3d, _ = m3u.pipeline(
+    
+    skel_3d_unit, _ = m3u.pipeline(
         skel_3d_raw,
         ref_idx    = ref_frame,
         out_stable = run_dir / "motionbert_scaled.npy",
@@ -146,7 +149,7 @@ def run_pipeline(
 
     # ────────────── reference lengths ─────────────────────────────
     len3d, len2d = pipeline_reference_lengths(
-            input_3d=skel_3d,
+            input_3d=skel_3d_unit,
             input_2d=skel_2d_unit,
             frames=str(ref_frame)
     )
@@ -168,12 +171,12 @@ def run_pipeline(
     df_heel = hra.pipeline(skel_2d_unit, df_reps)
 
 
-    df_fk   = fka.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
+    df_fk   = fka.pipeline("3d", None, skel_3d_unit, df_reps, lengths_json=json_2d)
    
 
     df_depth= sda.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
     
-    df_lean = fla.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
+    df_lean = fla.pipeline("3d", None, skel_3d_unit, df_reps, lengths_json=json_2d)
     
     df_hip  = hpr.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
     
@@ -181,12 +184,13 @@ def run_pipeline(
     
 
     if(debug):
-        sd.save_hip_height_plot(hip_y_full, rep_list, outdir / "debug_plots" / "hip_height_reps_after_detection.png")
-        ikn.plot_knee_distances_over_time(skel_2d_unit, outdir / "debug_plots" / "knee_distances_vs_time.png")
-        hra.plot_heel_raise(skel_2d_unit, outdir / "debug_plots" / "heel_raise_plot.png")
-        fka.plot_forward_knees(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_knees_plot.png", json_2d)
-        sda.plot_squat_depth(skel_2d_unit, df_reps, outdir / "debug_plots" / "squat_depth_plot.png", json_2d)
-        fla.plot_forward_lean(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_lean_plot.png", json_2d)
+        rff.plot_reference_frame(alphapose, ref_frame, outdir / "debug_plots" / "reference_frame.png", exercise_type=exercise)
+        sd.save_hip_height_plot(hip_y_full, rep_list, outdir / "debug_plots" / "squat_detector.png")
+        ikn.plot_knee_distances_over_time(skel_2d_unit, outdir / "debug_plots" / "inward_kne.png")
+        hra.plot_heel_raise(skel_2d_unit, outdir / "debug_plots" / "heel_raise.png")
+        fka.plot_forward_knees(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_kneess.png", json_2d)
+        sda.plot_squat_depth(skel_2d_unit, df_reps, outdir / "debug_plots" / "squat_depth.png", json_2d)
+        fla.plot_forward_lean(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_lean.png", json_2d)
         hpr.plot_hip_path(skel_2d_unit, df_reps, outdir / "debug_plots" / "hip_path_plot.png", json_2d)
         fwa.plot_feet_width(skel_2d_unit, df_reps, outdir / "debug_plots" / "feet_width_plot.png")
         

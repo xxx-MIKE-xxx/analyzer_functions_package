@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse, json, logging, os, re, shutil, subprocess, sys
 from datetime import datetime
 from pathlib import Path
-
+import time
 import boto3
 import importlib
 import importlib.resources as res
@@ -53,7 +53,7 @@ def debug_tools_pipeline(jobdir, analysis_dir, exercise):
     subprocess.run(skeleton_overlay_cmd, check=True)
 
     # -------- 3. debug_skeleton_hip_y_overlay.py --------
-    alphapose_scaled = jobdir / "analysis" / f"{exercise}_imputed_ma.npy"
+    alphapose_scaled = jobdir / "analysis" / "alphapose_scaled.npy"
     debug_hip_y_cmd = [
         "python", "debug_tools/debug_skeleton_hip_y_overlay.py",
         "--input", str(alphapose_scaled),
@@ -161,10 +161,15 @@ elif not src_local.exists():
     sys.exit(2)
 
 # ───────────── AlphaPose & MotionBERT ───────────────────────────
+alphapose_start = time.perf_counter()
 run([ALPHAPOSE_ROOT / "run_alphapose.sh",  jobdir])
-run([MOTIONBERT_ROOT / "run_motionbert.sh", jobdir])
+time_alphapose = time.perf_counter() - alphapose_start
 
+motionbert_start = time.perf_counter()
+run([MOTIONBERT_ROOT / "run_motionbert.sh", jobdir])
+time_motionbert = time.perf_counter() - motionbert_start
 # ───────────── Analytics driver (per exercise) ───────────────────
+analysis_start = time.perf_counter()
 driver = importlib.import_module(
     f"analyzer_pkg.exercises.{args.exercise}.driver"
 )
@@ -180,7 +185,7 @@ with app.app_context():
     report_json = driver.run_pipeline(
         json_pose_path          = jobdir / "alphapose" / "alphapose-results.json",
         X3D_pose_path           = x3d_npy,
-        reference_skeleton_path = EXER_DIR / "data" / "reference_frame.npy",
+        reference_skeleton_path = EXER_DIR / "data" / "reference_frame_26.npy",
         model_path              = Path(__file__).resolve().parent.parent
                                   / "models" / "rf_badframe_detector.joblib",
         outdir                  = jobdir / "analysis",
@@ -188,7 +193,9 @@ with app.app_context():
         debug                 = args.debug,
     ).get_json()
 
+time_analysis = time.perf_counter() - analysis_start
 # ───────────── Persist results ───────────────────────────────────
+total_time = time.perf_counter() - alphapose_start
 analysis_dir = jobdir / "analysis"
 analysis_dir.mkdir(exist_ok=True)
 
@@ -206,6 +213,13 @@ LOG.info("✅ finished – artefacts in %s", jobdir)
 LOG.info("   JSON : %s", json_path)
 LOG.info("   CSV  : %s", csv_path)
 LOG.info("   NPZ  : %s", npz_path)
+
+
+LOG.info("⏱️  TIMINGS (wall-clock seconds)")
+LOG.info("   • AlphaPose  : %.2f", time_alphapose)
+LOG.info("   • MotionBERT : %.2f", time_motionbert)
+LOG.info("   • Analytics  : %.2f", time_analysis)
+LOG.info("   • TOTAL      : %.2f", total_time)
 
 if args.debug:
     LOG.info("🔍 running debugging tools")

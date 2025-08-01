@@ -60,22 +60,7 @@ mkdir -p "$JOB_DIR/alphapose"
             -of default=noprint_wrappers=1:nokey=0 "${VIDEO}" || true
 } > "$JOB_DIR/video_meta.txt" || true
 
-python - <<'PY' "${VIDEO}" "${JOB_DIR}"
-import cv2, sys, pathlib, math
-video, outdir = sys.argv[1:3]
-outdir = pathlib.Path(outdir)
-cap   = cv2.VideoCapture(video)
-F     = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1)
 
-# grab 10 evenly-spaced frames (incl. first & last)
-for i in range(10):
-    idx = min(int(i*F/9), F-1)          # 0 … F-1
-    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-    ok, img = cap.read()
-    if ok:
-        fname = outdir / f"debug_{i:02d}.jpg"
-        fname.write_bytes(cv2.imencode(".jpg", img)[1])
-PY
 
 # ─────────────────────────────── 2. AlphaPose run ────────────────────────────
 ROOT="${ALPHAPOSE_ROOT:?ALPHAPOSE_ROOT env var not set}"

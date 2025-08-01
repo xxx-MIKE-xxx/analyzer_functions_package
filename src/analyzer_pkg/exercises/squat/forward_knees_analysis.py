@@ -223,37 +223,162 @@ def build_report(
     return df
 
 
+
+
+def _knee_forward_angle_3d(
+    kp: np.ndarray,
+    knee_idx: int,
+    ankle_idx: int
+) -> tuple[float, bool]:
+    """
+    Returns (theta_deg, valid_flag) for 3D keypoints.
+    Angle is the deviation of shin from vertical (z axis).
+    """
+    # 3D positions: (x, y, z)
+    x1, y1, z1 = kp[ankle_idx, :3]
+    x2, y2, z2 = kp[knee_idx, :3]
+    v = np.array([x2 - x1, y2 - y1, z2 - z1])
+    norm = np.linalg.norm(v)
+    if norm < 1e-6 or np.isnan(v).any():
+        return 0.0, False
+    # Reference vertical direction: (0, 0, 1)
+    dot = v[2] / norm  # projection onto z axis
+    dot = np.clip(dot, -1.0, 1.0)
+    theta = math.degrees(math.acos(dot))  # angle from vertical
+    return theta, True
+
+def _find_error_ranges(frames, values, th):
+    """Given frames and values, return list of [start, end] where value > th."""
+    ranges = []
+    active = False
+    for i, (f, v) in enumerate(zip(frames, values)):
+        if v > th:
+            if not active:
+                start = f
+                active = True
+        else:
+            if active:
+                end = frames[i - 1]
+                ranges.append([start, end])
+                active = False
+    if active:
+        ranges.append([start, frames[-1]])
+    return ranges
+
+def build_report_3d(
+    keypoints_3d: np.ndarray,
+    reps_csv_or_df: str | Path | pd.DataFrame,
+    out_csv: str | Path,
+    lengths_json: str | Path | Mapping,
+) -> pd.DataFrame:
+    # ---------------- reps table ----------------
+    reps_df = (
+        reps_csv_or_df.copy()
+        if isinstance(reps_csv_or_df, pd.DataFrame)
+        else pd.read_csv(reps_csv_or_df)
+    )
+    if {"rep_start", "rep_end"}.issubset(reps_df.columns):
+        reps_df = reps_df.rename(columns={"rep_start": "start",
+                                          "rep_end":   "end"})
+    required = {"rep_id", "start", "end"}
+    if not required.issubset(reps_df.columns):
+        raise ValueError(f"Reps table must contain {sorted(required)}")
+
+    rows = []
+    for _, rep in reps_df.iterrows():
+        rep_id, start, end = int(rep.rep_id), int(rep.start), int(rep.end)
+        left_angles, right_angles, frames = [], [], []
+        for f in range(start, end + 1):
+            kp = keypoints_3d[f]
+            θL, okL = _knee_forward_angle_3d(kp, L_KNEE, L_ANKLE)
+            θR, okR = _knee_forward_angle_3d(kp, R_KNEE, R_ANKLE)
+            left_angles.append(θL if okL else np.nan)
+            right_angles.append(θR if okR else np.nan)
+            frames.append(f)
+
+        # Identify frame ranges with errors
+        left_severe = _find_error_ranges(frames, left_angles, SEVERE_TH)
+        left_mild   = _find_error_ranges(frames, left_angles, MILD_TH)
+        right_severe = _find_error_ranges(frames, right_angles, SEVERE_TH)
+        right_mild   = _find_error_ranges(frames, right_angles, MILD_TH)
+
+        maxθL = np.nanmax(left_angles) if left_angles else 0.0
+        maxθR = np.nanmax(right_angles) if right_angles else 0.0
+        avgθL = float(np.nanmean(left_angles)) if left_angles else 0.0
+        avgθR = float(np.nanmean(right_angles)) if right_angles else 0.0
+
+        severityL = ("none", "mild", "severe")[2 if maxθL >= SEVERE_TH else 1 if maxθL >= MILD_TH else 0]
+        severityR = ("none", "mild", "severe")[2 if maxθR >= SEVERE_TH else 1 if maxθR >= MILD_TH else 0]
+
+        rows.append({
+            "rep_id": rep_id,
+            "left_avg_forward_angle_deg": round(avgθL, 2),
+            "right_avg_forward_angle_deg": round(avgθR, 2),
+            "left_max_forward_angle_deg": round(maxθL, 2),
+            "right_max_forward_angle_deg": round(maxθR, 2),
+            "left_severity": severityL,
+            "right_severity": severityR,
+            "left_mild_error_ranges": left_mild,
+            "left_severe_error_ranges": left_severe,
+            "right_mild_error_ranges": right_mild,
+            "right_severe_error_ranges": right_severe,
+        })
+
+    df = pd.DataFrame(rows)
+    out_csv = Path(out_csv)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    print(f"✅ 3D forward-knee report → {out_csv}")
+    return df
+
+
+    
+
 # --------------------------------------------------------------------------
 # Lightweight in-memory helper
 # --------------------------------------------------------------------------
 def pipeline(
+    type: str,
     keypoints: str | Path | np.ndarray,
+    keypoints_3d: str | Path | np.ndarray,
     reps: str | Path | pd.DataFrame,
     *,
     lengths_json: str | Path | Mapping,
     output_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Forward-knee analysis that returns a DataFrame.
+    Forward-knee analysis, flexible for 2D or 3D.
 
-    `lengths_json` **must be supplied**; omission raises `ValueError`.
+    Parameters
+    ----------
+    type          : "2d" or "3d"
+    keypoints     : .npy path or ndarray (F,26,3) keypoints in unit coords (2D)
+    keypoints_3d  : .npy path or ndarray (F,26,3) keypoints (3D)
+    reps          : CSV path or DataFrame with ['rep_id','start','end']
+    lengths_json  : shin lengths in the same unit scale
+    output_csv    : optional CSV path
     """
     if lengths_json is None:
         raise ValueError(
             "The `lengths_json` argument is required; shin lengths are essential."
         )
 
-    kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
     reps_df = reps.copy() if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
     if {"rep_start", "rep_end"}.issubset(reps_df.columns):
         reps_df = reps_df.rename(columns={"rep_start": "start",
                                           "rep_end":   "end"})
 
-    df = build_report(
-        kps, reps_df,
-        out_csv=output_csv or Path("/dev/null"),
-        lengths_json=lengths_json,
-    )
+    # Always load arrays only when needed (don't error on None)
+    if type == "3d":
+        kps_3d = np.load(keypoints_3d) if isinstance(keypoints_3d, (str, Path)) else keypoints_3d
+        df = build_report_3d(
+            kps_3d, reps_df, output_csv or Path("/dev/null"), lengths_json
+        )
+    else:
+        kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
+        df = build_report(
+            kps, reps_df, output_csv or Path("/dev/null"), lengths_json
+        )
 
     if output_csv is None:                     # silence dummy path print
         df.attrs.pop("filepath_or_buffer", None)
@@ -268,6 +393,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(
         "Forward-knee angle reporter (unit-square coords)"
     )
+    ap.add_argument("--type", required=True)
+    ap.add_argument("--keypoints_3d", required=False, default=None,)
     ap.add_argument("--keypoints", required=True,
                     help="NumPy .npy with (F,26,3) keypoints in unit coords")
     ap.add_argument("--reps",      required=True,
@@ -279,4 +406,16 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     kps = np.load(args.keypoints)
-    build_report(kps, args.reps, args.out, args.lengths)
+    kps_3d = np.load(args.keypoints_3d) if args.keypoints_3d else None
+    if args.type == "3d" and kps_3d is None:
+        raise ValueError("Must supply --keypoints_3d for 3D forward-knee analysis")
+    if args.type == "3d" and kps_3d is not None:
+        build_report_3d(
+            kps_3d, args.reps, args.out, args.lengths
+        )
+    else:
+        # 2D forward-knee analysis
+        build_report(
+            kps, args.reps, args.out, args.lengths
+        )
+    
