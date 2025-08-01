@@ -171,12 +171,12 @@ def run_pipeline(
     df_heel = hra.pipeline(skel_2d_unit, df_reps)
 
 
-    df_fk   = fka.pipeline("3d", None, skel_3d_unit, df_reps, lengths_json=json_2d)
+    df_fk   = fka.pipeline("3d", None, skel_3d_unit, df_reps)
    
 
     df_depth= sda.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
     
-    df_lean = fla.pipeline("3d", None, skel_3d_unit, df_reps, lengths_json=json_2d)
+    df_lean = fla.pipeline("3d", None, skel_3d_unit, df_reps)
     
     df_hip  = hpr.pipeline(skel_2d_unit, df_reps, lengths_json=json_2d)
     
@@ -187,10 +187,12 @@ def run_pipeline(
         rff.plot_reference_frame(alphapose, ref_frame, outdir / "debug_plots" / "reference_frame.png", exercise_type=exercise)
         sd.save_hip_height_plot(hip_y_full, rep_list, outdir / "debug_plots" / "squat_detector.png")
         ikn.plot_knee_distances_over_time(skel_2d_unit, outdir / "debug_plots" / "inward_kne.png")
-        hra.plot_heel_raise(skel_2d_unit, outdir / "debug_plots" / "heel_raise.png")
-        fka.plot_forward_knees(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_kneess.png", json_2d)
-        sda.plot_squat_depth(skel_2d_unit, df_reps, outdir / "debug_plots" / "squat_depth.png", json_2d)
-        fla.plot_forward_lean(skel_2d_unit, df_reps, outdir / "debug_plots" / "forward_lean.png", json_2d)
+        ikn.plot_fppa_over_time(skel_2d_unit, df_reps, outdir / "debug_plots" / "fppa_plot.png")
+        hra.plot_heel_raise(skel_2d_unit, outdir / "debug_plots" / "heel_raise.png", y_threshold=0.01)
+        hra.plot_heel_angle(skel_2d_unit, outdir / "debug_plots" / "heel_angle.png", reps=df_reps)
+        fka.plot_forward_knees(skel_3d_unit, df_reps, outdir / "debug_plots" / "forward_kneess.png", use_3d=True)
+        sda.plot_squat_depth(skel_2d_unit, df_reps, outdir / "debug_plots" / "squat_depth.png")
+        fla.plot_forward_lean("3d",None, skel_3d_unit, df_reps, outdir / "debug_plots" / "forward_lean.png")
         hpr.plot_hip_path(skel_2d_unit, df_reps, outdir / "debug_plots" / "hip_path_plot.png", json_2d)
         fwa.plot_feet_width(skel_2d_unit, df_reps, outdir / "debug_plots" / "feet_width_plot.png")
         

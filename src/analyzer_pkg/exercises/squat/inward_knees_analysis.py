@@ -26,6 +26,64 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+
+
+def _signed_outward_dist(pt: np.ndarray, hip: np.ndarray, ankle: np.ndarray, side: str) -> float:
+    """
+    Signed outward distance from knee to hip-ankle line.
+    Positive = knee is outside, Negative = knee is inside (valgus error).
+    Side must be "L" or "R".
+    """
+    v = ankle - hip
+    norm = np.linalg.norm(v)
+    if norm < 1e-8:
+        return 0.0
+    # Outward is always to the left for the left leg and to the right for the right leg,
+    # so we flip the direction accordingly
+    # For left leg: outward is +ve, for right leg: outward is +ve (from the body's perspective)
+    perp = np.array([-v[1], v[0]]) / norm
+    if side == "R":
+        perp = -perp   # flip for right side
+    return float(np.dot(pt - hip, perp))
+
+
+
+def plot_fppa_over_time(
+    keypoints_array: np.ndarray,
+    reps_df: pd.DataFrame,
+    out_path: str | Path,
+    mild_thresh: float = 170.0,
+    severe_thresh: float = 160.0,
+):
+    """Plot FPPA (deg) per frame with severity bands and thresholds."""
+    kp2 = keypoints_array[..., :2]
+    frames = range(len(kp2))
+    fppa_left, fppa_right = [], []
+
+    for f in frames:
+        fppa_left.append(_fppa_outside(kp2[f], "L"))
+        fppa_right.append(_fppa_outside(kp2[f], "R"))
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frames, fppa_left, label="Left FPPA", color="blue")
+    plt.plot(frames, fppa_right, label="Right FPPA", color="red")
+
+    plt.axhline(mild_thresh, color="orange", ls="--", label=f"Mild threshold ({mild_thresh}°)")
+    plt.axhline(severe_thresh, color="red", ls="--", label=f"Severe threshold ({severe_thresh}°)")
+
+    # Fill severity regions
+    plt.fill_between(frames, 0, severe_thresh, color="red", alpha=0.10, label="Severe zone")
+    plt.fill_between(frames, severe_thresh, mild_thresh, color="orange", alpha=0.08, label="Mild zone")
+
+    plt.xlabel("Frame")
+    plt.ylabel("FPPA (deg)")
+    plt.title("FPPA (Frontal Plane Projection Angle) per Frame")
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📉  Saved FPPA plot → {out_path}")
+
 _EPS = 1e-8 
 def _angle(v1: np.ndarray, v2: np.ndarray) -> float:
     """
@@ -87,10 +145,10 @@ def plot_knee_distances_over_time(
     for f in frames:
         k = kp2[f]
         # Left leg:  hip=11, knee=13, ankle=15
-        ldist = abs(_signed_dist(k[13], k[11], k[15]))
+        ldist = _signed_outward_dist(k[13], k[11], k[15], "L")
         dists_left.append(ldist)
         # Right leg: hip=12, knee=14, ankle=16
-        rdist = abs(_signed_dist(k[14], k[12], k[16]))
+        rdist = _signed_outward_dist(k[14], k[12], k[16], "R")
         dists_right.append(rdist)
 
     plt.figure(figsize=(12, 4))
@@ -100,7 +158,7 @@ def plot_knee_distances_over_time(
         plt.plot(frames, dists_right, label="Right knee distance", color="red")
     plt.axhline(show_thresh, color="gray", ls="--", lw=1, label=f"thresh={show_thresh}")
     plt.xlabel("Frame")
-    plt.ylabel("Abs. knee distance from hip-ankle line (unit square)")
+    plt.ylabel("Signed knee distance from hip-ankle line (unit square)")
     plt.title("Knee-to-line distance over time (left/right legs)")
     plt.legend()
     plt.tight_layout()
@@ -133,9 +191,7 @@ def _fppa_outside(kp2: np.ndarray, side: str = "L") -> float:
     return interior if medial else 360.0 - interior
 
 
-# ---------------------------------------------------------------------
-# ❶  FPPA report generator
-# ---------------------------------------------------------------------
+# ---------------- FPPA report with start/peak/return frames ---------------- #
 def generate_ffpa_report(
     keypoints_array: np.ndarray,
     reps: str | Path | pd.DataFrame,
@@ -143,151 +199,151 @@ def generate_ffpa_report(
     severe_thresh: float = 160.0,
     output_csv: str | Path | None = "ffpa_report.csv",
 ) -> pd.DataFrame:
-    """
-    Compute outside-knee FPPA (deg) for each rep.
-
-    Parameters
-    ----------
-    keypoints_array : ndarray (F, 17, 3)  – imputed 2-D+conf keypoints
-    reps            : CSV path or DataFrame with rep boundaries
-    mild_thresh     : FPPA < mild_thresh ⇒ "mild" valgus
-    severe_thresh   : FPPA < severe_thresh ⇒ "severe" valgus
-    output_csv      : where to write the report (None = don’t write)
-
-    Returns
-    -------
-    pd.DataFrame with per-rep minima and severity labels.
-    """
-    # --- load reps table --------------------------------------------------
     reps_df = reps if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
-
-    # Detect column names
     if {"start", "end"}.issubset(reps_df.columns):
         start_col, end_col = "start", "end"
     elif {"rep_start", "rep_end"}.issubset(reps_df.columns):
         start_col, end_col = "rep_start", "rep_end"
     else:
-        raise ValueError(
-            "Reps table must contain either ['start','end'] or ['rep_start','rep_end'] columns"
-        )
+        raise ValueError("Reps table must contain either ['start','end'] or ['rep_start','rep_end'] columns")
 
-    # --- iterate reps -----------------------------------------------------
-    rows: list[dict] = []
+    def _find_events(vals: list[float], mild, severe, start_idx):
+        arr = np.array(vals)
+        if not len(arr) or np.all(np.isnan(arr)):
+            return dict(severity='none', min_val=float('nan'), 
+                        start=None, peak=None, end=None)
+        # Determine threshold (severe takes priority)
+        if np.nanmin(arr) < severe:
+            th = severe
+            sev = 'severe'
+        elif np.nanmin(arr) < mild:
+            th = mild
+            sev = 'mild'
+        else:
+            th = mild
+            sev = 'none'
+        # Start: first frame below threshold
+        below = np.where(arr < th)[0]
+        if below.size == 0:
+            return dict(severity=sev, min_val=float('nan'), 
+                        start=None, peak=None, end=None)
+        start = int(start_idx + below[0])
+        # Peak: minimum value index
+        peak_rel = int(np.nanargmin(arr))
+        peak = int(start_idx + peak_rel)
+        # End: first frame after peak where FPPA returns above threshold
+        above = np.where((np.arange(len(arr)) > peak_rel) & (arr >= th))[0]
+        end = int(start_idx + above[0]) if above.size > 0 else int(start_idx + len(arr) - 1)
+        return dict(severity=sev, min_val=float(np.nanmin(arr)), 
+                    start=start, peak=peak, end=end)
+
+    rows = []
     for _, rep in reps_df.iterrows():
         rep_id = int(rep["rep_id"])
         start, end = int(rep[start_col]), int(rep[end_col])
-
         left_vals, right_vals = [], []
         for f in range(start, end + 1):
             kp2 = keypoints_array[f, :, :2]
             left_vals.append(_fppa_outside(kp2, "L"))
             right_vals.append(_fppa_outside(kp2, "R"))
 
-        def _class(vals: list[float]) -> tuple[str, float]:
-            if not vals:
-                return "none", float("nan")
-            mn = min(vals)
-            if mn < severe_thresh:
-                return "severe", mn
-            if mn < mild_thresh:
-                return "mild", mn
-            return "none", mn
-
-        lsev, lmin = _class(left_vals)
-        rsev, rmin = _class(right_vals)
-        rows.append(
-            {
-                "rep_id": rep_id,
-                "left_min_FPPA": lmin,
-                "left_severity": lsev,
-                "right_min_FPPA": rmin,
-                "right_severity": rsev,
-            }
-        )
+        ldict = _find_events(left_vals, mild_thresh, severe_thresh, start)
+        rdict = _find_events(right_vals, mild_thresh, severe_thresh, start)
+        rows.append({
+            "rep_id": rep_id,
+            "left_min_FPPA": ldict["min_val"],
+            "left_severity": ldict["severity"],
+            "left_problem_start": ldict["start"],
+            "left_problem_peak": ldict["peak"],
+            "left_problem_end": ldict["end"],
+            "right_min_FPPA": rdict["min_val"],
+            "right_severity": rdict["severity"],
+            "right_problem_start": rdict["start"],
+            "right_problem_peak": rdict["peak"],
+            "right_problem_end": rdict["end"],
+        })
 
     df = pd.DataFrame(rows)
-
     if output_csv is not None:
         out = Path(output_csv)
         out.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out, index=False)
         print(f"✅ FPPA report → {out}")
-
     return df
 
-
-# ---------------------------------------------------------------------
-# ❷  Line-crossing report (normalised coords)
-# ---------------------------------------------------------------------
+# ------------- Line-crossing report with start/peak/return frames ------------- #
 def generate_line_crossing_report(
     keypoints_array: np.ndarray,
     reps: str | Path | pd.DataFrame,
     crossing_thresh: float = 0.05,
     output_csv: str | Path = "line_crossing_report.csv",
 ) -> pd.DataFrame:
-    """
-    Detect knee crossings of the hip-to-ankle line for each rep.
-
-    Parameters
-    ----------
-    crossing_thresh : float
-        Minimum perpendicular distance (unit coords) to count as a crossing.
-        0.05 ≈ 5 % of frame height/width.
-    """
     reps_df = reps if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
-
-    # Column detection
     if {"start", "end"}.issubset(reps_df.columns):
         start_col, end_col = "start", "end"
     elif {"rep_start", "rep_end"}.issubset(reps_df.columns):
         start_col, end_col = "rep_start", "rep_end"
     else:
-        raise ValueError(
-            "Reps table must contain either ['start','end'] or ['rep_start','rep_end'] columns"
-        )
+        raise ValueError("Reps table must contain either ['start','end'] or ['rep_start','rep_end'] columns")
+
+    def _find_events(arr, th, start_idx):
+        arr = np.array(arr)
+        if not len(arr) or np.all(np.isnan(arr)):
+            return dict(severity='none', max_val=float('nan'),
+                        start=None, peak=None, end=None)
+        # Apply threshold: only consider values above threshold
+        over = np.where(arr >= th)[0]
+        if over.size == 0:
+            return dict(severity='none', max_val=float('nan'),
+                        start=None, peak=None, end=None)
+        mx = np.nanmax(arr)
+        sev = 'severe' if mx >= 2 * th else 'mild'
+        start = int(start_idx + over[0])
+        peak_rel = int(np.nanargmax(arr))
+        peak = int(start_idx + peak_rel)
+        # End: first after peak where distance drops below threshold
+        below = np.where((np.arange(len(arr)) > peak_rel) & (arr < th))[0]
+        end = int(start_idx + below[0]) if below.size > 0 else int(start_idx + len(arr) - 1)
+        return dict(severity=sev, max_val=mx, start=start, peak=peak, end=end)
 
     rows = []
     for _, rep in reps_df.iterrows():
         rep_id = int(rep["rep_id"])
         start, end = int(rep[start_col]), int(rep[end_col])
-
         ldist, rdist = [], []
         for f in range(start, end + 1):
             kp2 = keypoints_array[f, :, :2]
-
-            # ---------- left side ----------
+            # Left side
             medial_l = _signed_dist((kp2[11] + kp2[12]) / 2, kp2[11], kp2[15]) * \
                        _signed_dist(kp2[13], kp2[11], kp2[15]) > 0
             if medial_l:
                 dist_l = abs(_signed_dist(kp2[13], kp2[11], kp2[15]))
-                if dist_l >= crossing_thresh:
-                    ldist.append(dist_l)
-
-            # ---------- right side ----------
+                ldist.append(dist_l)
+            else:
+                ldist.append(0.0)
+            # Right side
             medial_r = _signed_dist((kp2[11] + kp2[12]) / 2, kp2[12], kp2[16]) * \
                        _signed_dist(kp2[14], kp2[12], kp2[16]) > 0
             if medial_r:
                 dist_r = abs(_signed_dist(kp2[14], kp2[12], kp2[16]))
-                if dist_r >= crossing_thresh:
-                    rdist.append(dist_r)
-
-        def _class(ds):
-            if not ds:
-                return "none", 0.0
-            mx = max(ds)
-            return ("severe" if mx >= 2 * crossing_thresh else "mild"), mx
-
-        lsev, lmax = _class(ldist)
-        rsev, rmax = _class(rdist)
-        rows.append(
-            {
-                "rep_id": rep_id,
-                "left_max_dist": lmax,
-                "left_severity": lsev,
-                "right_max_dist": rmax,
-                "right_severity": rsev,
-            }
-        )
+                rdist.append(dist_r)
+            else:
+                rdist.append(0.0)
+        ldict = _find_events(ldist, crossing_thresh, start)
+        rdict = _find_events(rdist, crossing_thresh, start)
+        rows.append({
+            "rep_id": rep_id,
+            "left_max_dist": ldict["max_val"],
+            "left_severity": ldict["severity"],
+            "left_problem_start": ldict["start"],
+            "left_problem_peak": ldict["peak"],
+            "left_problem_end": ldict["end"],
+            "right_max_dist": rdict["max_val"],
+            "right_severity": rdict["severity"],
+            "right_problem_start": rdict["start"],
+            "right_problem_peak": rdict["peak"],
+            "right_problem_end": rdict["end"],
+        })
 
     df = pd.DataFrame(rows)
     out = Path(output_csv)
@@ -295,7 +351,6 @@ def generate_line_crossing_report(
     df.to_csv(out, index=False)
     print(f"✅ Line-crossing report → {out}")
     return df
-
 
 # ---------------------------------------------------------------------
 # ❸  Convenience wrapper – FPPA only

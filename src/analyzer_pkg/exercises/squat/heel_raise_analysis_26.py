@@ -4,6 +4,8 @@ heel_raise_analysis_26.py  🦶
 ============================
 Detect per-foot heel raise during squat repetitions (HALPE-26 keypoints).
 
+Supports both: (1) distance-based (Y-coordinate) and (2) angle-based detection.
+
 Assumptions
 -----------
 * Keypoints are **unit-square normalised**: x, y ∈ [0, 1].
@@ -11,16 +13,17 @@ Assumptions
 
 Public API
 ----------
-analyze_heel_raise_report(...)
-pipeline(...)                    # convenience – returns a DataFrame
+analyze_heel_raise_report(...)   # (distance)
+pipeline(...)                    # (distance, DataFrame)
+angle(...)                       # (angle, DataFrame)
+plot_heel_raise(...)             # (plot Y)
+plot_heel_angle(...)             # (plot angle)
 
-Change log (2025-07-06)
+Change log (2025-08-01)
 -----------------------
-* Threshold is now unit-scale (default 0.02) instead of 15 px.
-* Repetition tables may use either ['start','mid','end'] or
-  ['rep_start','rep_mid','rep_end'].
-* `analyze_heel_raise_report` accepts a DataFrame or CSV path.
+* Added angle-based API: angle(...) and plot_heel_angle(...).
 """
+
 from __future__ import annotations
 import matplotlib.pyplot as plt
 import argparse
@@ -36,11 +39,73 @@ import pandas as pd
 # HALPE-26 keypoint indices
 LEFT_ANKLE, RIGHT_ANKLE = 15, 16
 LEFT_HEEL,   RIGHT_HEEL = 24, 25
+LEFT_TOE,    RIGHT_TOE  = 22, 23
 ANKLES = (LEFT_ANKLE, RIGHT_ANKLE)
 HEELS  = (LEFT_HEEL,   RIGHT_HEEL)
+TOES   = (LEFT_TOE,    RIGHT_TOE)
+
+# Angle-based threshold (deg)
+ANGLE_THRESHOLD = 15.0
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Helpers (shared)
+# -----------------------------------------------------------------------------
+def _median_pos(
+    data: np.ndarray,
+    frames: Sequence[int],
+    idx: int,
+    conf_thresh: float = 0.0,
+) -> np.ndarray:
+    """Median (x, y) of keypoint *idx* across *frames* (skip low-conf pts)."""
+    coords = [
+        data[f, idx, :2]
+        for f in frames
+        if data[f, idx, 2] >= conf_thresh
+    ]
+    if not coords:
+        return np.array([np.nan, np.nan])
+    arr = np.array(coords)
+    return np.median(arr, axis=0)
+
+def _angle_between(u: np.ndarray, v: np.ndarray) -> float:
+    """Angle in degrees between two 2D vectors."""
+    if np.linalg.norm(u) < 1e-8 or np.linalg.norm(v) < 1e-8:
+        return np.nan
+    cos_theta = np.dot(u, v) / (np.linalg.norm(u) * np.linalg.norm(v))
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_theta)))
+
+def _heel_angle_per_frame(
+    kps: np.ndarray,
+    resting_heel: np.ndarray,
+    toe: np.ndarray,
+    frames: Sequence[int],
+    heel_idx: int,
+    toe_idx: int,
+    conf_thresh: float = 0.0,
+):
+    """
+    For each frame, compute angle between resting_heel→toe and curr_heel→toe.
+    Returns: (angles (deg), valid mask)
+    """
+    angles = []
+    valids = []
+    for f in frames:
+        if kps[f, heel_idx, 2] < conf_thresh or kps[f, toe_idx, 2] < conf_thresh:
+            angles.append(np.nan)
+            valids.append(False)
+            continue
+        curr_heel = kps[f, heel_idx, :2]
+        curr_toe  = kps[f, toe_idx, :2]
+        v0 = toe - resting_heel
+        v1 = curr_toe - curr_heel
+        angle = _angle_between(v0, v1)
+        angles.append(angle)
+        valids.append(True)
+    return np.array(angles), np.array(valids)
+
+# -----------------------------------------------------------------------------
+# Distance-based detection (original)
 # -----------------------------------------------------------------------------
 def _median_y(
     data: np.ndarray,
@@ -56,15 +121,13 @@ def _median_y(
     ]
     return float("nan") if not coords else float(np.median(coords))
 
-
-
-
 def plot_heel_raise(
     keypoints: str | Path | np.ndarray,
     out_path: str | Path,
     *,
     left_heel_idx: int = 24,
     right_heel_idx: int = 25,
+    y_threshold: float = 0.01,
 ) -> None:
     """
     Saves a plot of left/right heel Y-coordinates over all frames to out_path (PNG).
@@ -79,6 +142,7 @@ def plot_heel_raise(
     plt.figure(figsize=(12, 5))
     plt.plot(frames, left_heel_y,  label="Left Heel",  color="blue")
     plt.plot(frames, right_heel_y, label="Right Heel", color="red")
+    plt.axhline(y_threshold, color="gray", ls="--", lw=1, label=f"Y threshold ({y_threshold})")
     plt.xlabel("Frame")
     plt.ylabel("Heel Y position (unit square)")
     plt.title("Heel Y-coordinates over time")
@@ -89,8 +153,6 @@ def plot_heel_raise(
     plt.savefig(out_path, dpi=160)
     plt.close()
     print(f"📉  Saved heel Y plot → {out_path}")
-
-
 
 def _first_lift_frame(
     data: np.ndarray,
@@ -116,10 +178,6 @@ def _first_lift_frame(
                 return f
     return -1
 
-
-# -----------------------------------------------------------------------------
-# Main logic
-# -----------------------------------------------------------------------------
 def analyze_heel_raise_report(
     keypoints: np.ndarray,
     reps: str | Path | pd.DataFrame,
@@ -128,18 +186,7 @@ def analyze_heel_raise_report(
     conf_thresh: float = 0.00,
 ) -> list[dict]:
     """
-    Detect heel raise for each repetition.
-
-    Parameters
-    ----------
-    keypoints : ndarray (F, 26, 3) – (x, y, conf) in unit square
-    reps      : CSV path or DataFrame with rep boundaries
-    threshold : float (unit coords)  – raise distance to flag a lift
-    conf_thresh : float             – minimum kp confidence
-
-    Returns
-    -------
-    list of dicts with keys: rep_id, lifted, frames
+    Detect heel raise for each repetition. (Distance-based)
     """
     # --- load reps table --------------------------------------------------
     if isinstance(reps, pd.DataFrame):
@@ -199,13 +246,162 @@ def analyze_heel_raise_report(
 
     return records
 
+# -----------------------------------------------------------------------------
+# Main distance-based pipeline
+# -----------------------------------------------------------------------------
+def pipeline(
+    keypoints: str | Path | np.ndarray,
+    reps: str | Path | pd.DataFrame,
+    *,
+    threshold: float = 0.01,
+    conf_thresh: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Run the heel-raise analysis (distance-based) end-to-end and return a DataFrame.
+    """
+    kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
+    reps_df = reps.copy() if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
+    records = analyze_heel_raise_report(
+        kps, reps_df, threshold=threshold, conf_thresh=conf_thresh
+    )
+    return pd.DataFrame(records)
 
 # -----------------------------------------------------------------------------
-# CLI utility
+# Angle-based detection
+# -----------------------------------------------------------------------------
+def angle(
+    keypoints: str | Path | np.ndarray,
+    reps: str | Path | pd.DataFrame,
+    *,
+    angle_threshold: float = ANGLE_THRESHOLD,
+    conf_thresh: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Detect per-foot heel raise based on heel angle for each repetition.
+
+    For each rep:
+        1. Compute resting heel and toe position (median over baseline frames).
+        2. For all mid frames, compute angle between resting_heel→toe and curr_heel→toe.
+        3. If angle > angle_threshold, flag as raised.
+
+    Returns a DataFrame with rep_id, left_angle_deg, right_angle_deg, left_raised, right_raised.
+    """
+    kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
+    reps_df = reps.copy() if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
+    if {"rep_start", "rep_mid", "rep_end"}.issubset(reps_df.columns):
+        reps_df = reps_df.rename(
+            columns={"rep_start": "start", "rep_mid": "mid", "rep_end": "end"}
+        )
+    required = {"rep_id", "start", "mid", "end"}
+    if not required.issubset(reps_df.columns):
+        raise ValueError(f"Reps table must contain {sorted(required)}")
+
+    F = kps.shape[0]
+    records: list[dict] = []
+
+    for _, row in reps_df.iterrows():
+        rep_id, start, mid, end = map(int, (row.rep_id, row.start, row.mid, row.end))
+        before = list(range(max(0, start - 5), start))
+        after  = list(range(end, min(F, end + 6)))
+        baseline_frames = before + after
+
+        # Resting heel and toe positions
+        left_rest_heel  = _median_pos(kps, baseline_frames, LEFT_HEEL,  conf_thresh)
+        left_rest_toe   = _median_pos(kps, baseline_frames, LEFT_TOE,   conf_thresh)
+        right_rest_heel = _median_pos(kps, baseline_frames, RIGHT_HEEL, conf_thresh)
+        right_rest_toe  = _median_pos(kps, baseline_frames, RIGHT_TOE,  conf_thresh)
+
+        # Mid-frames: usually [mid], but you could expand to window if desired
+        mid_frames = [mid]
+
+        left_angles, left_valids   = _heel_angle_per_frame(
+            kps, left_rest_heel, left_rest_toe, mid_frames, LEFT_HEEL, LEFT_TOE, conf_thresh)
+        right_angles, right_valids = _heel_angle_per_frame(
+            kps, right_rest_heel, right_rest_toe, mid_frames, RIGHT_HEEL, RIGHT_TOE, conf_thresh)
+
+        left_raised  = bool(left_valids[0] and left_angles[0] > angle_threshold)
+        right_raised = bool(right_valids[0] and right_angles[0] > angle_threshold)
+
+        records.append({
+            "rep_id": rep_id,
+            "left_angle_deg": left_angles[0],
+            "right_angle_deg": right_angles[0],
+            "left_raised": left_raised,
+            "right_raised": right_raised,
+        })
+    return pd.DataFrame(records)
+
+def plot_heel_angle(
+    keypoints: str | Path | np.ndarray,
+    out_path: str | Path,
+    *,
+    conf_thresh: float = 0.0,
+    angle_threshold: float = ANGLE_THRESHOLD,
+    reps: str | Path | pd.DataFrame = None
+):
+    """
+    Plot left/right heel raise angle over all frames.
+    Uses the *resting* position from all frames before/after reps.
+    If `reps` is provided, resting position will be median over before/after frames of *all* reps.
+    """
+    kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
+    F = kps.shape[0]
+    frames = np.arange(F)
+
+    if reps is not None:
+        reps_df = reps.copy() if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
+        if {"rep_start", "rep_mid", "rep_end"}.issubset(reps_df.columns):
+            reps_df = reps_df.rename(
+                columns={"rep_start": "start", "rep_mid": "mid", "rep_end": "end"}
+            )
+        required = {"rep_id", "start", "mid", "end"}
+        if not required.issubset(reps_df.columns):
+            raise ValueError(f"Reps table must contain {sorted(required)}")
+        baseline_frames = []
+        for _, row in reps_df.iterrows():
+            start, end = int(row.start), int(row.end)
+            before = list(range(max(0, start - 5), start))
+            after  = list(range(end, min(F, end + 6)))
+            baseline_frames += before + after
+        baseline_frames = sorted(set(baseline_frames))
+    else:
+        baseline_frames = list(range(F))
+
+    left_rest_heel  = _median_pos(kps, baseline_frames, LEFT_HEEL,  conf_thresh)
+    left_rest_toe   = _median_pos(kps, baseline_frames, LEFT_TOE,   conf_thresh)
+    right_rest_heel = _median_pos(kps, baseline_frames, RIGHT_HEEL, conf_thresh)
+    right_rest_toe  = _median_pos(kps, baseline_frames, RIGHT_TOE,  conf_thresh)
+
+    left_angles,  _ = _heel_angle_per_frame(kps, left_rest_heel,  left_rest_toe,  frames, LEFT_HEEL,  LEFT_TOE,  conf_thresh)
+    right_angles, _ = _heel_angle_per_frame(kps, right_rest_heel, right_rest_toe, frames, RIGHT_HEEL, RIGHT_TOE, conf_thresh)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(frames, left_angles,  label="Left heel raise angle (deg)", color="blue")
+    if np.all(np.isnan(right_angles)):
+        print("⚠️ No valid right heel raise angle data for right foot!")
+    else:
+        plt.plot(frames, right_angles, label="Right heel raise angle (deg)", color="red")
+    plt.axhline(angle_threshold, color="gray", ls="--", lw=1, label=f"Angle threshold ({angle_threshold}°)")
+    plt.xlabel("Frame")
+    plt.plot(frames, right_angles, label="Right heel raise angle (deg)", color="red", alpha=0.85)
+    plt.plot(frames, left_angles, label="Left heel raise angle (deg)", color="blue", alpha=0.85)
+    plt.ylabel("Heel raise angle (degrees)")
+    plt.title("Heel Raise Angle per Frame (vs resting heel-toe)")
+    plt.plot(frames, np.where(np.isnan(right_angles), -10, right_angles), 'r-', label="Right heel raise angle (deg)")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"📉  Saved heel raise angle plot → {out_path}")
+
+# -----------------------------------------------------------------------------
+# CLI utility (distance-based only)
 # -----------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Detect per-foot heel raise and write a detailed CSV report."
+        description="Detect per-foot heel raise and write a detailed CSV report (distance-based)."
     )
     parser.add_argument("--keypoints", type=Path, default="imputed_ma.npy",
                         help="NumPy .npy file with (F,26,3) keypoints in unit coords")
@@ -213,7 +409,7 @@ def main() -> None:
                         help="CSV with rep_id,start,mid,end (or rep_* variants)")
     parser.add_argument("--output",    type=Path, default="heel_raise_report.csv")
     parser.add_argument("--threshold", type=float, default=0.01,
-                        help="Lift distance threshold in unit coordinates (default 0.02)")
+                        help="Lift distance threshold in unit coordinates (default 0.01)")
     parser.add_argument("--conf",      type=float, default=0.0,
                         help="Minimum keypoint confidence")
     args = parser.parse_args()
@@ -232,37 +428,6 @@ def main() -> None:
         writer.writerows(records)
 
     print(f"Report written → {args.output.resolve()}")
-
-
-# -----------------------------------------------------------------------------
-# ❶ Convenience wrapper – in-memory pipeline
-# -----------------------------------------------------------------------------
-def pipeline(
-    keypoints: str | Path | np.ndarray,
-    reps: str | Path | pd.DataFrame,
-    *,
-    threshold: float = 0.01,
-    conf_thresh: float = 0.0,
-) -> pd.DataFrame:
-    """
-    Run the heel-raise analysis end-to-end and return a DataFrame.
-    """
-    # 1) keypoints
-    kps = np.load(keypoints) if isinstance(keypoints, (str, Path)) else keypoints
-
-    # 2) reps table, column normalisation handled in analyze_… function
-    reps_df = (
-        reps.copy() if isinstance(reps, pd.DataFrame) else pd.read_csv(reps)
-    )
-
-    # 3) analysis
-    records = analyze_heel_raise_report(
-        kps, reps_df, threshold=threshold, conf_thresh=conf_thresh
-    )
-
-    # 4) DataFrame
-    return pd.DataFrame(records)
-
 
 if __name__ == "__main__":
     main()

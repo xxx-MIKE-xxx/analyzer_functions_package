@@ -47,46 +47,39 @@ def plot_feet_width(
     out_path: str | Path,
 ):
     """
-    Plot stance width ratio (feet/hip) per frame, with severity thresholds.
+    Scatter-plot the stance width ratio at the **start and end** of every rep.
     """
-    # Thresholds (must match analysis)
-    SEVERE_TH = 0.90
-    MILD_TH = 1.00
+    SEVERE_TH, MILD_TH = 0.90, 1.00
+    L_HIP, R_HIP, L_ANK, R_ANK = 11, 12, 15, 16
 
-    # Indexes (HALPE-26)
-    L_HIP, R_HIP = 11, 12
-    L_ANK, R_ANK = 15, 16
+    xs, ys = [], []
 
-    frame_nums = []
-    ratios = []
-
-    # Standardize columns
     if {"rep_start", "rep_end"}.issubset(reps.columns):
         reps = reps.rename(columns={"rep_start": "start", "rep_end": "end"})
 
     for _, row in reps.iterrows():
-        start, end = int(row.start), int(row.end)
-        for f in range(start, end + 1):
+        for f in (int(row.start), int(row.end)):
             feet_d = np.linalg.norm(keypoints[f, L_ANK, :2] - keypoints[f, R_ANK, :2])
             hip_d  = np.linalg.norm(keypoints[f, L_HIP, :2] - keypoints[f, R_HIP, :2])
             ratio  = feet_d / hip_d if hip_d > 0 else float("nan")
-            frame_nums.append(f)
-            ratios.append(ratio)
+            xs.append(f)
+            ys.append(ratio)
 
     plt.figure(figsize=(12, 5))
-    plt.plot(frame_nums, ratios, label="Feet/Hip width ratio", lw=1.5)
-    plt.axhline(SEVERE_TH, color="red", ls="--", lw=1.5, label="Severe threshold (0.90)")
-    plt.axhline(MILD_TH, color="orange", ls="--", lw=1.5, label="Mild threshold (1.00)")
+    plt.scatter(xs, ys, c="tab:blue", s=30, label="Feet/Hip width ratio")
+    plt.axhline(SEVERE_TH, color="red",    ls="--", lw=1.5, label="Severe threshold (0.90)")
+    plt.axhline(MILD_TH,   color="orange", ls="--", lw=1.5, label="Mild threshold (1.00)")
     plt.xlabel("Frame")
     plt.ylabel("Width ratio (Feet/Hip)")
-    plt.title("Feet Width Ratio per Frame")
+    plt.title("Feet Width Ratio – start & end of each squat")
     plt.legend()
     plt.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=160)
     plt.close()
-    print(f"📉  Saved feet width plot → {out_path}")
+    print(f"📉  Saved feet-width plot → {out_path}")
+
 
 
 
@@ -114,36 +107,34 @@ def generate_report(
     out_csv: str | None = "feet_width_report.csv",
 ) -> pd.DataFrame:
     """
-    Parameters
-    ----------
-    kps      : ndarray (F,26,3)
-    reps     : DataFrame with ['rep_id','start','end']
-    out_csv  : None → don’t write; otherwise path for CSV
+    For each rep we now use only **two frames**:
+        – the first frame  (row.start)
+        – the last  frame  (row.end)
+    The reported ratio is the mean of those two values.
     """
     records: List[Dict[str, Union[int, float, str]]] = []
 
     for _, row in reps.iterrows():
         start, end = int(row.start), int(row.end)
 
-        ratios: List[float] = []
-        for f in range(start, end + 1):
-            feet_d = dist2d(kps[f, L_ANK, :2], kps[f, R_ANK, :2])
-            hip_d  = dist2d(kps[f, L_HIP, :2], kps[f, R_HIP, :2])
-            ratios.append(feet_d / hip_d if hip_d > 0 else float("nan"))
+        # --- ratio at start
+        feet_d0 = dist2d(kps[start, L_ANK, :2], kps[start, R_ANK, :2])
+        hip_d0  = dist2d(kps[start, L_HIP, :2], kps[start, R_HIP, :2])
+        r0      = feet_d0 / hip_d0 if hip_d0 > 0 else float("nan")
 
-        if ratios:
-            arr = np.array(ratios)
-            idx_min = int(np.nanargmin(arr))
-            ratio_min = float(arr[idx_min])
-            frame_min = start + idx_min
-        else:
-            ratio_min, frame_min = float("nan"), -1
+        # --- ratio at end
+        feet_d1 = dist2d(kps[end, L_ANK, :2], kps[end, R_ANK, :2])
+        hip_d1  = dist2d(kps[end, L_HIP, :2], kps[end, R_HIP, :2])
+        r1      = feet_d1 / hip_d1 if hip_d1 > 0 else float("nan")
+
+        ratio_avg = np.nanmean([r0, r1])          # mean of the two
+        frame_tag = f"{start}/{end}"              # just for reference
 
         records.append({
             "rep_id":   int(row.rep_id),
-            "severity": severity(ratio_min),
-            "frame":    frame_min,
-            "ratio":    round(ratio_min, 3) if not math.isnan(ratio_min) else float("nan"),
+            "severity": severity(ratio_avg),
+            "frames":   frame_tag,
+            "ratio":    round(ratio_avg, 3) if not math.isnan(ratio_avg) else float("nan"),
         })
 
     df = pd.DataFrame(records)

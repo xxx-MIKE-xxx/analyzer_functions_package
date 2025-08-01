@@ -52,7 +52,7 @@ def plot_hip_path(
     lengths_json: str | Path | dict = None,
 ):
     """
-    Plot hip-midpoint deviation ratio (absolute) over frames, with severity thresholds.
+    Plot hip-midpoint deviation ratio (absolute) over frames, with severity thresholds and rep boundaries.
     """
     # Severity bands (must match core)
     NONE_TH = 0.04
@@ -111,6 +111,16 @@ def plot_hip_path(
     plt.plot(frame_nums, dev_ratios, label="|Hip-mid deviation / leg length|", lw=1.5)
     plt.axhline(NONE_TH, color="orange", ls="--", lw=1.5, label="Mild threshold (0.04)")
     plt.axhline(MILD_TH, color="red", ls="--", lw=1.5, label="Severe threshold (0.08)")
+
+    # ---- Add vertical lines for start/end of each rep ----
+    for idx, row in reps.iterrows():
+        start, end = int(row['start']), int(row['end'])
+        plt.axvline(start, color='green', ls=':', lw=1, alpha=0.7)
+        plt.axvline(end, color='purple', ls=':', lw=1, alpha=0.7)
+        # Optional: Label (slightly offset vertically for clarity)
+        plt.text(start, plt.ylim()[1]*0.95, f"Rep {idx+1} start", color='green', rotation=90, va='top', ha='right', fontsize=8)
+        plt.text(end, plt.ylim()[1]*0.95, f"Rep {idx+1} end", color='purple', rotation=90, va='top', ha='left', fontsize=8)
+
     plt.xlabel("Frame")
     plt.ylabel("Absolute deviation ratio")
     plt.title("Hip Path Deviation Ratio Over Frames")
@@ -238,12 +248,20 @@ def generate_report(
         lp, lr, lval = peak_and_return(dev_ratio, "left")
         rp, rr, rval = peak_and_return(dev_ratio, "right")
 
+         # Use MILD_TH as the "problem" threshold (you can adjust)
+        l_start, l_end = find_problem_segment(dev_ratio, "left", MILD_TH)
+        r_start, r_end = find_problem_segment(dev_ratio, "right", MILD_TH)
+
         records.append({
             "rep_id": rep_id,
             "severity": [severity(abs(lval)), severity(abs(rval))],
             "frames": [
-                [int(rng[lp]), int(rng[lr])],
-                [int(rng[rp]), int(rng[rr])]
+                {"start": int(rng[l_start]) if l_start != -1 else None,
+                 "peak": int(rng[lp]),
+                 "end": int(rng[l_end]) if l_end != -1 else None},
+                {"start": int(rng[r_start]) if r_start != -1 else None,
+                 "peak": int(rng[rp]),
+                 "end": int(rng[r_end]) if r_end != -1 else None},
             ],
             "value": [abs(lval), abs(rval)],
         })
@@ -309,6 +327,23 @@ def pipeline(
     if output_csv is None:
         df.attrs.pop("filepath_or_buffer", None)
     return df
+
+
+
+
+def find_problem_segment(dev: np.ndarray, side: str, th: float) -> Tuple[int, int]:
+    """
+    Find first (start) and last (end) frame where abs(dev) exceeds threshold.
+    Returns relative indices (for slicing rep range).
+    """
+    if side == "left":
+        mask = dev < -th
+    else:
+        mask = dev > th
+    indices = np.where(mask)[0]
+    if indices.size == 0:
+        return -1, -1
+    return int(indices[0]), int(indices[-1])
 
 # ---------------------------------------------------------------------
 # CLI entry-point

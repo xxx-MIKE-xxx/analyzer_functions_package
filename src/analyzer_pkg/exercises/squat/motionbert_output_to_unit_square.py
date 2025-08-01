@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-motionbert_output_to_unit_square.py  – reference‑frame version (2D/3D unified)
+motionbert_output_to_unit_square.py  – reference‑frame version (2D/3D unified)
 ------------------------------------------------------------------------------
 
 This version scales **either** a 2D (F, K, 2) or 3D (F, K, 3) skeleton sequence
@@ -43,10 +43,10 @@ def _normalise_and_crop(kps: np.ndarray, bbox: Tuple[float, float, float]) -> np
     out = kps.copy()
     if side < EPS:
         return out
+    is_3d = out.shape[1] >= 3
     valid = ~np.isnan(out[:, 0]) & ~np.isnan(out[:, 1])
     xnorm = (out[valid, 0] - xmin) / side
     ynorm = 1.0 - (out[valid, 1] - ymin) / side  # always flip Y for y-up!
-    # Mark as nan any point OUTSIDE [0, 1] in either axis
     inside = (xnorm >= 0) & (xnorm <= 1) & (ynorm >= 0) & (ynorm <= 1)
     out_valid_idx = np.where(valid)[0]
     for i, v in enumerate(out_valid_idx):
@@ -56,6 +56,7 @@ def _normalise_and_crop(kps: np.ndarray, bbox: Tuple[float, float, float]) -> np
         else:
             out[v, 0] = np.nan
             out[v, 1] = np.nan
+            # In 3D: preserve z as-is (do not touch out[v, 2])
     return out
 
 def pipeline(

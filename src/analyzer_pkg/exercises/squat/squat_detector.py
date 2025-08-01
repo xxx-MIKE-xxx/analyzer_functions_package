@@ -48,7 +48,10 @@ def detect_repetitions_threshold(
 
     reps: List[Dict] = []
     rep_id = 1
+    used = set()
     for mid in mids:
+        if mid in used:
+            continue  # skip if already used in a previous rep (not strictly needed if mids are unique)
         s = mid
         while s > 0 and hip_seg[s] < stand_thr: s -= 1
         while s + 1 < mid and hip_seg[s + 1] >= hip_seg[s]: s += 1
@@ -57,21 +60,27 @@ def detect_repetitions_threshold(
         while e - 1 > mid and hip_seg[e - 1] >= hip_seg[e]: e -= 1
 
         # ----------- NEW LOGIC: refine start/end using derivative ----------
-        # Back up from s to earliest point with slope < -delta (keep falling fast)
         s_ref = s
         while s_ref > 0 and (hip_seg[s_ref] - hip_seg[s_ref-1]) < -refine_delta:
             s_ref -= 1
-        # Forward from e to latest point with slope > +delta (keep rising fast)
         e_ref = e
         while e_ref < len(hip_seg) - 1 and (hip_seg[e_ref+1] - hip_seg[e_ref]) > refine_delta:
             e_ref += 1
 
+        # NEW: Find global min between s_ref and e_ref (rep_mid)
         if (e_ref - s_ref) < 5:
             continue
+        seg = hip_seg[s_ref:e_ref+1]
+        if len(seg) == 0:
+            continue
+        rel_mid = np.argmin(seg)  # index within seg
+        rep_mid = s_ref + rel_mid
         reps.append(dict(rep_id=rep_id,
                          rep_start=s_ref + start_frame,
-                         rep_mid=mid + start_frame,
+                         rep_mid=rep_mid + start_frame,
                          rep_end=e_ref + start_frame))
+        # Mark used frames so overlaps don't generate multiple reps (optional)
+        used.update(range(s_ref, e_ref+1))
         rep_id += 1
     return reps, depth_thr, stand_thr, np.asarray(hip_y), hip_seg
 
