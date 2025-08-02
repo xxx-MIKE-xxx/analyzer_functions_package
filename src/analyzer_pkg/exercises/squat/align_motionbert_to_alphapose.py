@@ -439,10 +439,16 @@ def align_motionbert_sequence(
         Pp = (R_fixed @ P3.T).T                              # (k,3)
         muP = Pp.mean(axis=0); muQ = Q3.mean(axis=0)
         P0 = Pp - muP; Q0 = Q3 - muQ
-        denom = float((P0 * P0).sum())
+
+        # Because Q3 has zero Z, including the Z dimension of P0 in the
+        # least-squares scale estimate biases the result.  Use only XY
+        # components so scale is determined from comparable dimensions.
+        P0_xy = P0[:, :2]
+        Q0_xy = Q0[:, :2]
+        denom = float((P0_xy * P0_xy).sum())
         if denom <= 1e-12:
             raise RuntimeError("Degenerate fixed-R fit (denom≈0)")
-        s = float((P0 * Q0).sum() / denom)
+        s = float((P0_xy * Q0_xy).sum() / denom)
         t = (muQ - s * muP).astype(np.float32)
         return s, t
 
