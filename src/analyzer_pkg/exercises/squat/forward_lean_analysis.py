@@ -101,7 +101,7 @@ def _frame_deviation_3d(kp: np.ndarray) -> float:
         norm = np.linalg.norm(torso)
         if norm < 1e-6:
             continue
-        vertical = np.array([0, 0, 1])   # MotionBERT: z is up
+        vertical = np.array([0, 1, 0], dtype=float)  # y-up (z is depth)
         cosang = np.clip(np.dot(torso, vertical) / norm, -1.0, 1.0)
         angle = math.degrees(math.acos(cosang))
         angles.append(angle)

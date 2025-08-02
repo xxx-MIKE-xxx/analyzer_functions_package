@@ -56,23 +56,51 @@ _EDGES = [  # (parent, child) pairs
 
 def _load_motionbert_X3D(jobdir: str | os.PathLike) -> np.ndarray:
     """
-    Accepts either
-      •  .../motionbert/3d-pose-results.npz   (file)
-      •  .../motionbert/3d-pose-results.npz/  (directory with X3D.npy)
+    Locate and load the aligned MotionBERT skeleton.  Tries in order:
+      * {jobdir}/analysis/motionbert_aligned.npy
+      * {jobdir}/analysis/motionbert/motionbert_aligned.npy
+      * {jobdir}/motionbert/motionbert_aligned.npy
+      * fallback to {jobdir}/analysis/*.npz or .npy containing aligned output
     Returns float32 array (T, 17, 3)
     """
-    mb_root = os.path.join(jobdir, "motionbert")
-    path = os.path.join(mb_root, "3d-pose-results.npz")
-    if os.path.isdir(path):  # new layout
-        x3d_path = os.path.join(path, "X3D.npy")
-        if not os.path.exists(x3d_path):
-            raise FileNotFoundError(f"missing {x3d_path}")
-        poses = np.load(x3d_path)
-    elif os.path.isfile(path):  # legacy .npz file
-        poses = np.load(path)["X3D"]
-    else:
-        raise FileNotFoundError(f"{path} (not a file nor dir)")
-    if poses.shape[1:] != (17, 3):
+    jobdir = os.fspath(jobdir)
+    candidates = [
+        os.path.join(jobdir, "analysis", "motionbert_aligned.npy"),
+        os.path.join(jobdir, "analysis", "motionbert", "motionbert_aligned.npy"),
+        os.path.join(jobdir, "motionbert", "motionbert_aligned.npy"),
+        os.path.join(jobdir, "analysis", "motionbert_aligned.npz"),
+    ]
+    poses = None
+
+    for p in candidates:
+        if not os.path.exists(p):
+            continue
+        try:
+            if p.lower().endswith(".npz"):
+                with np.load(p) as z:
+                    # try common keys
+                    for key in ("motionbert_aligned", "aligned_3d", "X3D"):
+                        if key in z.files:
+                            poses = z[key]
+                            break
+                    if poses is None:
+                        # fallback to first array
+                        if z.files:
+                            poses = z[z.files[0]]
+            else:
+                poses = np.load(p)
+        except Exception:
+            continue
+        if poses is not None:
+            break
+
+    if poses is None:
+        raise FileNotFoundError(
+            f"Could not find aligned MotionBERT skeleton in expected locations under {jobdir}."
+        )
+
+    poses = np.asarray(poses)
+    if poses.ndim != 3 or poses.shape[1:] != (17, 3):
         raise ValueError(f"expected (T,17,3) but got {poses.shape}")
     return poses.astype(np.float32)
 

@@ -144,18 +144,24 @@ def _knee_forward_angle(kp: np.ndarray, knee_idx: int, ankle_idx: int, shin_len:
 def _knee_forward_angle_3d(kp: np.ndarray, knee_idx: int, ankle_idx: int) -> tuple[float, bool]:
     """
     Returns (theta_deg, valid_flag) for 3D keypoints.
-    Angle is the deviation of shin from vertical (z axis).
+    Angle is the deviation of the shin from vertical (y axis).
+    (We use y-up; z is depth.)
     """
     x1, y1, z1 = kp[ankle_idx, :3]
     x2, y2, z2 = kp[knee_idx, :3]
-    v = np.array([x2 - x1, y2 - y1, z2 - z1])
-    norm = np.linalg.norm(v)
-    if norm < 1e-6 or np.isnan(v).any():
+    v = np.array([x2 - x1, y2 - y1, z2 - z1], dtype=float)
+    if not np.isfinite(v).all():
         return 0.0, False
-    dot = v[2] / norm  # projection onto z axis
-    dot = np.clip(dot, -1.0, 1.0)
-    theta = math.degrees(math.acos(dot))  # angle from vertical
+    norm = np.linalg.norm(v)
+    if norm < 1e-6:
+        return 0.0, False
+
+    # projection onto y (vertical) axis
+    dot = v[1] / norm
+    dot = float(np.clip(dot, -1.0, 1.0))
+    theta = math.degrees(math.acos(dot))  # angle from vertical (y-up)
     return theta, True
+
 
 def _find_error_ranges(frames, values, th):
     """Given frames and values, return list of [start, end] where value > th."""
