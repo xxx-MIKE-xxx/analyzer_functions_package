@@ -53,6 +53,40 @@ _EDGES = [  # (parent, child) pairs
     (8, 14), (14, 15), (15, 16),
 ]
 
+_PERM_YUP_TO_ZUP = np.array([[1, 0, 0],
+                             [0, 0, 1],
+                             [0, 1, 0]], dtype=np.float32)
+
+_PERM_XZY = np.array([[1, 0, 0],
+                      [0, 0, 1],
+                      [0, 1, 0]], dtype=np.float32)  # (x,y,z)->(x,z,y)
+
+def _yup_to_zup(P: np.ndarray) -> np.ndarray:
+    """(x right, y up, z forward)  →  (x right, y forward, z up)."""
+    shp = P.shape
+    return (_PERM_XZY @ P.reshape(-1, 3).T).T.reshape(shp)
+
+def _level_by_feet_Z(poses: np.ndarray) -> np.ndarray:
+    """
+    Rotate around Z so the feet line (LAnkle-RAnkle) is horizontal in XY.
+    poses: (T,17,3) in z-up.
+    """
+    LAN, RAN = 6, 3  # H36M-17 indices: LAnkle=6, RAnkle=3
+    # robust XY vector from R->L ankles over time
+    foot_xy = np.nanmedian(poses[:, LAN, :2] - poses[:, RAN, :2], axis=0)
+    if not np.all(np.isfinite(foot_xy)) or np.linalg.norm(foot_xy) < 1e-6:
+        # (rare) fall back to hips if feet are together or missing
+        LHIP, RHIP = 4, 1
+        foot_xy = np.nanmedian(poses[:, LHIP, :2] - poses[:, RHIP, :2], axis=0)
+
+    theta = np.arctan2(foot_xy[1], foot_xy[0])   # angle vs +X
+    c, s = np.cos(-theta), np.sin(-theta)        # rotate by -theta to make it flat
+    Rz = np.array([[c, -s, 0],
+                   [s,  c, 0],
+                   [0,  0, 1]], dtype=np.float32)
+    return (Rz @ poses.reshape(-1, 3).T).T.reshape(poses.shape)
+
+
 
 def _load_motionbert_X3D(jobdir: str | os.PathLike) -> np.ndarray:
     """
@@ -116,12 +150,21 @@ def _set_equal_aspect(ax: Axes3D, pts: np.ndarray) -> None:
 
 
 def launch_viewer(jobdir: str | os.PathLike, fps: int = 30) -> None:
-    poses = _load_motionbert_X3D(jobdir)  # (T,17,3)
+    poses_yup = _load_motionbert_X3D(jobdir)   # (T,17,3)
+    poses = _yup_to_zup(poses_yup)
+    poses = _level_by_feet_Z(poses)
+    ROOT = 0
+    pelvis0 = np.nanmedian(poses[:, ROOT, :], axis=0)
+    poses -= pelvis0
     T = poses.shape[0]
 
     fig = plt.figure("Skeleton 3-D viewer")
     ax = fig.add_subplot(111, projection="3d")
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z (up)")
+
 
     # initial draw
     pts = poses[0]

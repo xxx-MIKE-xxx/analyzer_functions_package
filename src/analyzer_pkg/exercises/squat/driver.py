@@ -132,18 +132,26 @@ def run_pipeline(
         output_dir=None,
     )
 
-    skel_3d_aligned, M = align_motionbert_sequence(
-        kps2_all=alphapose,
-        kps3_all=skel_3d_raw,
-        robust=True,
-        rmse_thresh=5e-3,   # tweak if your pixel scale differs
-    )
+    skel_3d_aligned_img, skel_3d_aligned_yup, M_img, M_yup = align_motionbert_sequence(
+    kps2_all=alphapose,
+    kps3_all=skel_3d_raw,
+    robust=True,
+    rmse_thresh=5e-3,   # adjust if your units are pixels; e.g., try 8.0
+)
 
+# Save the y-up sequence for your analysis/viewers
+    skel_3d_aligned = skel_3d_aligned_yup
     np.save(run_dir / "motionbert_aligned.npy", skel_3d_aligned)
     _mirror(run_dir / "motionbert_aligned.npy", outdir)
 
-    # Optional: compute per-frame RMSE diagnostics (in pixel units)
-    rmse_seq = evaluate_alignment_over_sequence(alphapose, skel_3d_aligned)
+    # (Optional but recommended) Persist both similarity matrices
+    np.save(run_dir / "similarity_matrix_img.npy", M_img)
+    np.save(run_dir / "similarity_matrix_yup.npy", M_yup)
+    _mirror(run_dir / "similarity_matrix_img.npy", outdir)
+    _mirror(run_dir / "similarity_matrix_yup.npy", outdir)
+
+    # Compute per-frame RMSE diagnostics in the image frame (matches AlphaPose coords)
+    rmse_seq = evaluate_alignment_over_sequence(alphapose, skel_3d_aligned_img)
     np.save(run_dir / "alignment_rmse.npy", rmse_seq)
     _mirror(run_dir / "alignment_rmse.npy", outdir)
     print(f"[INFO] Alignment RMSE: mean={np.nanmean(rmse_seq):.6f}, max={np.nanmax(rmse_seq):.6f}")

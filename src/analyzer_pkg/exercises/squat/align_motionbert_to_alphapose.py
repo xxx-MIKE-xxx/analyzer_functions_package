@@ -44,12 +44,31 @@ JOINT_MAP = {
 IDX_2D: Sequence[int] = list(JOINT_MAP.keys())          # in AlphaPose arrays
 IDX_3D: Sequence[int] = [JOINT_MAP[i] for i in IDX_2D]  # in MotionBERT arrays
 
-from typing import Sequence, Tuple
 
 
+PERM_XZY = np.array([[1,0,0],
+                     [0,0,1],
+                     [0,1,0]], dtype=np.float32)
+
+FLIP_Y = np.diag([1, -1, 1]).astype(np.float32)
 
 
+CONV_IMG_TO_YUP = np.array([[1, 0,  0],
+                            [0, 0,  1],
+                            [0,-1,  0]], dtype=np.float32)
 
+def to_y_up(P_img: np.ndarray) -> np.ndarray:
+    """Map image-frame coords to y-up, z-forward."""
+    shp = P_img.shape
+    return (CONV_IMG_TO_YUP @ P_img.reshape(-1, 3).T).T.reshape(shp)
+
+# Optional: if a viewer expects z-up (matplotlib “z up” demos)
+CONV_IMG_TO_ZUP = np.array([[1, 0, 0],
+                            [0, 0,-1],
+                            [0, 1, 0]], dtype=np.float32)
+def to_z_up(P_img: np.ndarray) -> np.ndarray:
+    shp = P_img.shape
+    return (CONV_IMG_TO_ZUP @ P_img.reshape(-1, 3).T).T.reshape(shp)
 
 def load_raw_alphapose(json_path: str | Path) -> np.ndarray:
     """
@@ -158,6 +177,7 @@ def load_raw_alphapose(json_path: str | Path) -> np.ndarray:
         if not np.isfinite(arr[:, :2]).all():
             raise ValueError(f"Non-finite AlphaPose coordinates at frame {fid}")
         out[i] = arr.astype(np.float32)
+    
 
     return out
 
@@ -271,32 +291,44 @@ def _umeyama_from_point_sets(
 
 
 
-
-def _umeyama_alignment(
-    kps2: np.ndarray,                 # (26,3) AlphaPose (x,y,conf)
-    kps3: np.ndarray,                 # (17,3) MotionBERT (x,y,z)
-    *,
-    idx2d: Sequence[int],
-    idx3d: Sequence[int],
-) -> Tuple[float, np.ndarray, np.ndarray]:
+def _similarity_xy_only_permuted(P3: np.ndarray, Q2: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
     """
-    Convenience wrapper: build matched clouds from full-frame arrays and
-    call the point-cloud solver.
+    Fit s, R (3x3), t that aligns PERM_XZY @ P3 to Q2 on the image plane only.
+    Rotation is restricted to the XY block (depth axis left unchanged).
     """
-    if len(idx2d) != len(idx3d):
-        raise ValueError("idx2d and idx3d must have the same length")
+    if P3.ndim != 2 or P3.shape[1] != 3 or Q2.ndim != 2 or Q2.shape[1] != 2:
+        raise ValueError("Bad shapes for P3 (k,3) or Q2 (k,2)")
+    if len(P3) != len(Q2) or len(P3) < 3:
+        raise ValueError("Need ≥3 correspondences")
 
-    P = kps3[idx3d, :3].astype(np.float64)            # (m,3)
-    Q2 = kps2[idx2d, :2].astype(np.float64)           # (m,2)
-    Q = np.column_stack([Q2, np.zeros(len(Q2))])      # (m,3) z=0
+    # work in the permuted space where (X,Y) := (orig X,Z) matches image (x,y)
+    Pperm = (PERM_XZY @ P3.T).T.astype(np.float64)   # (k,3)
+    Pxy   = Pperm[:, :2]
+    Qxy   = Q2.astype(np.float64)
 
-    # Drop any non-finite rows (and rows with NaNs in either set)
-    mask = np.isfinite(P).all(1) & np.isfinite(Q).all(1)
-    P, Q = P[mask], Q[mask]
-    if P.shape[0] < 3:
-        raise RuntimeError("Not enough valid correspondences for alignment")
+    muP = Pxy.mean(0); muQ = Qxy.mean(0)
+    P0  = Pxy - muP;   Q0  = Qxy - muQ
 
-    return _umeyama_from_point_sets(P, Q)
+    C = (P0.T @ Q0) / len(P0)                # 2x2
+    U, S, Vt = np.linalg.svd(C)
+    R2 = Vt.T @ U.T
+    if np.linalg.det(R2) < 0:
+        Vt[1, :] *= -1
+        R2 = Vt.T @ U.T
+
+    varP = float((P0 * P0).sum()) / len(P0)
+    if varP <= 1e-12:
+        raise RuntimeError("Degenerate XY-only fit")
+    s = float(S.sum() / varP)
+
+    t_xy = muQ - s * (R2 @ muP)
+
+    # lift to 3D in the permuted space: rotate in XY, keep Z
+    R = np.eye(3, dtype=np.float64)
+    R[:2, :2] = R2
+    t = np.array([t_xy[0], t_xy[1], 0.0], dtype=np.float64)
+    return s, R.astype(np.float32), t.astype(np.float32)
+
 
 # --------------------------------------------------------------------------
 # ❷  Core maths – frame-wise similarity estimation
@@ -309,19 +341,12 @@ def estimate_frame_transform(
     conf_th: float = 0.05,             # drop very low-conf. 2-D points
 ) -> Tuple[float, np.ndarray, np.ndarray]:
     """
-    Estimate a *single-frame* similarity transform (s, R, t) that best aligns
-    the raw 3-D MotionBERT skeleton onto the AlphaPose detections.
-
+    ...
     The solver:
         • selects only the joint pairs listed in idx2d / idx3d
         • ignores 2-D points whose confidence < conf_th
-        • lifts every 2-D (x,y) to (x,y,0) and runs Umeyama closed-form
-
-    Returns
-    -------
-    s : float            – uniform scale
-    R : ndarray (3,3)    – proper rotation, det(R)=+1
-    t : ndarray (3,)     – translation vector   (all float32)
+        • permutes MotionBERT (X,Y,Z)→(X,Z,Y) so (X,Z) matches image (x,y)
+        • fits s,R,t on the image plane only (depth axis unchanged)
     """
     if len(idx2d) != len(idx3d):
         raise ValueError("idx2d and idx3d must have identical length")
@@ -345,9 +370,7 @@ def estimate_frame_transform(
 
     P3_valid = P3[vis]                             # (k,3)
     Q2d      = P2[vis, :2]                         # (k,2)
-    Q3_valid = np.column_stack([Q2d, np.zeros(len(Q2d))])  # (k,3) z=0
-
-    s, R, t = _umeyama_from_point_sets(P3_valid, Q3_valid)
+    s, R, t = _similarity_xy_only_permuted(P3_valid, Q2d)
     print(f"[DEBUG] estimate_frame_transform: s={s:.6f}, det(R)={np.linalg.det(R):.6f}")
 
     return float(s), R.astype(np.float32), t.astype(np.float32)
@@ -377,7 +400,7 @@ def align_motionbert_sequence(
     lookahead: int = 3,                   # NEW: choose best of next K frames
     fix_rotation: bool = True,            # NEW: keep R from the first fit
     strict_rmse: bool = False,            # NEW: raise if ref-RMSE > rmse_thresh
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit a similarity transform and apply it to every MotionBERT frame.
     Enhancements:
@@ -389,8 +412,14 @@ def align_motionbert_sequence(
 
     Returns
     -------
-    skel_3d_aligned : (F,17,3)
-    M               : (4,4) similarity matrix built from the *last* (s,R,t)
+    aligned_img : (F,17,3)
+        Aligned sequence in the image frame (x right, y down, z forward).
+    aligned_yup : (F,17,3)
+        Same sequence converted to y-up (x right, y up, z forward).
+    M_img : (4,4)
+        4×4 similarity in image frame.
+    M_yup : (4,4)
+        Same transform expressed in y-up.
     """
 
     # ── basic checks ────────────────────────────────────────────────────
@@ -406,49 +435,43 @@ def align_motionbert_sequence(
     F = kps2_all.shape[0]
 
     # ── helper: RMSE on a single frame for diagnostics ──────────────────
-    def _rmse_frame(k2_frame: np.ndarray, k3_frame: np.ndarray, s: float, R: np.ndarray, t: np.ndarray) -> float:
-        k2 = k2_frame[idx2d]                                # (m,3)
-        k3p = ((s * (R @ k3_frame[idx3d].T)).T + t)[:, :2]  # (m,2)
-        vis = np.isfinite(k2[:, :2]).all(1) & np.isfinite(k3p).all(1) & (k2[:, 2] >= conf_th)
+    def _rmse_frame(k2_frame, k3_frame, s, R, t) -> float:
+        # Selected 2-D detections (x,y,conf)
+        k2 = k2_frame[idx2d]  # (m,3)
+
+        # Apply: permute MotionBERT [X,Y,Z]→[X,Z,Y], then rotate/scale/translate
+        k3p_xy = ((s * (R @ (PERM_XZY @ k3_frame[idx3d].T))).T + t)[:, :2]  # (m,2)
+
+        vis = (
+            np.isfinite(k2[:, :2]).all(1)
+            & np.isfinite(k3p_xy).all(1)
+            & (k2[:, 2] >= conf_th)
+        )
         if vis.sum() < 2:
             return np.nan
-        diffs = k3p[vis] - k2[vis, :2]
-        return float(np.sqrt(np.mean(diffs * diffs)))
+
+        diffs = k3p_xy[vis] - k2[vis, :2]
+        return float(np.sqrt((diffs * diffs).mean()))
+
 
     # ── helper: (s,t) least-squares with fixed R ────────────────────────
-    def _fit_scale_translation_fixed_R(
-        k2_frame: np.ndarray,     # (26,3)
-        k3_frame: np.ndarray,     # (17,3)
-        R_fixed: np.ndarray,
-    ) -> tuple[float, np.ndarray]:
-        # Build correspondences
-        P3 = k3_frame[idx3d, :3].astype(np.float64)          # (k,3)
-        Q2 = k2_frame[idx2d, :2].astype(np.float64)          # (k,2)
-        Q3 = np.column_stack([Q2, np.zeros(len(Q2))])         # (k,3)
-
-        # Visibility mask
+    def _fit_scale_translation_fixed_R(k2_frame, k3_frame, R_fixed):
+        P3 = k3_frame[idx3d, :3].astype(np.float64)
+        Q2 = k2_frame[idx2d, :2].astype(np.float64)
         conf = k2_frame[idx2d, 2]
-        vis = np.isfinite(P3).all(1) & np.isfinite(Q3).all(1) & (conf >= conf_th)
+
+        vis = np.isfinite(P3).all(1) & np.isfinite(Q2).all(1) & (conf >= conf_th)
         if vis.sum() < 3:
             raise RuntimeError("Not enough correspondences for fixed-R fit")
 
-        P3 = P3[vis]
-        Q3 = Q3[vis]
-
-        # Rotate P, then solve min_{s,t} || s*P' + t - Q ||
-        Pp = (R_fixed @ P3.T).T                              # (k,3)
-        muP = Pp.mean(axis=0); muQ = Q3.mean(axis=0)
-        P0 = Pp - muP; Q0 = Q3 - muQ
-
-        # Because Q3 has zero Z, including the Z dimension of P0 in the
-        # least-squares scale estimate biases the result.  Use only XY
-        # components so scale is determined from comparable dimensions.
-        P0_xy = P0[:, :2]
-        Q0_xy = Q0[:, :2]
-        denom = float((P0_xy * P0_xy).sum())
-        if denom <= 1e-12:
+        Pp = (R_fixed @ (PERM_XZY @ P3[vis].T)).T           # rotate permuted points
+        Q3 = np.column_stack([Q2[vis], np.zeros(vis.sum())])
+        muP = Pp.mean(0); muQ = Q3.mean(0)
+        P0 = Pp - muP;  Q0 = Q3 - muQ
+        denom = float((P0[:, :2] ** 2).sum())
+        if denom <= 1e-12 or not np.isfinite(denom):
             raise RuntimeError("Degenerate fixed-R fit (denom≈0)")
-        s = float((P0_xy * Q0_xy).sum() / denom)
+        s = float((P0[:, :2] * Q0[:, :2]).sum() / denom)
         t = (muQ - s * muP).astype(np.float32)
         return s, t
 
@@ -494,9 +517,9 @@ def align_motionbert_sequence(
     out = np.empty_like(kps3_all)
 
     def _apply_block(f0: int, f1: int, s_: float, R_: np.ndarray, t_: np.ndarray) -> None:
-        flat = kps3_all[f0:f1].reshape(-1, 3).T      # (3, (f1-f0)*17)
-        aligned_flat = (s_ * (R_ @ flat)).T + t_     # ((f1-f0)*17, 3)
-        out[f0:f1] = aligned_flat.reshape((f1 - f0, ) + kps3_all.shape[1:]).astype(np.float32)
+        flat = kps3_all[f0:f1].reshape(-1, 3).T                     # (3,N)
+        aligned_flat = (s_ * (R_ @ (PERM_XZY @ flat))).T + t_       # ← use s_,R_,t_ + permutation
+        out[f0:f1] = aligned_flat.reshape((f1 - f0,) + kps3_all.shape[1:]).astype(np.float32)
 
     start = 0
     have_fixed_R = False
@@ -550,11 +573,21 @@ def align_motionbert_sequence(
         start = next_cut
 
     # ── 3) Pack final 4×4 similarity matrix (last params) ───────────────
-    M = np.eye(4, dtype=np.float32)
-    M[:3, :3] = s * R
-    M[:3,  3] = t
+    M_img = np.eye(4, dtype=np.float32)
+    M_img[:3, :3] = s * (R @ PERM_XZY)
+    M_img[:3,  3] = t
 
-    return out, M
+    # Convert aligned sequence to y-up for your analysis
+    
+
+    # 4×4 in y-up (convenience)
+    M_yup = np.eye(4, dtype=np.float32)
+    M_yup[:3, :3] = CONV_IMG_TO_YUP @ M_img[:3, :3]
+    M_yup[:3,  3] = CONV_IMG_TO_YUP @ M_img[:3,  3]
+    
+    out_y_up = to_y_up(out)
+    # Return: image-frame sequence, y-up sequence, and both matrices
+    return out, out_y_up, M_img, M_yup
 
 
 # --------------------------------------------------------------------------
@@ -607,9 +640,8 @@ def project_3d_to_2d(
         raise ValueError("kps3 must have shape (K,3)")
 
     # (3,K) ← (3,3)@(3,K)
-    transformed = (s * (R @ kps3.T)).T + t          # (K,3)
+    transformed = (s * (R @ (PERM_XZY @ kps3.T))).T + t
     return transformed[:, :2].astype(np.float32)
-
 
 # --------------------------------------------------------------------------
 # ❺  Utility – per-frame reprojection RMSE
@@ -725,23 +757,17 @@ def evaluate_alignment_over_sequence(
 
 
     for f in range(F):
-        k2 = kps2_all[f, idx2d]            # (K,3)
-        k3_xy = kps3_aligned[f, idx3d, :2] # (K,2)
-
-        # mask: finite & confidence
+        k2    = kps2_all[f, idx2d]              # (K,3)
+        k3_xy = kps3_aligned[f, idx3d, :2]      # (K,2) ← use :2
         vis = (
             np.isfinite(k2[:, :2]).all(1)
             & np.isfinite(k3_xy).all(1)
             & (k2[:, 2] >= conf_th)
         )
-
         if vis.sum() < 2:
-            # Not enough data → leave np.nan so caller can decide
             continue
-
         diffs = k2[vis, :2].astype(np.float64) - k3_xy[vis].astype(np.float64)
         rmse_per_frame[f] = np.sqrt((diffs**2).mean()).astype(np.float32)
-
     # Debug safety: warn if *all* frames are NaN
     if np.isnan(rmse_per_frame).all():
         raise RuntimeError(
@@ -833,27 +859,31 @@ def main() -> None:
     kps3_all = np.load(args.motionbert)
 
     # ---------- align ----------------------------------------------------
-    aligned_3d, M = align_motionbert_sequence(
+    aligned_3d_img, aligned_3d_yup, M_img, M_yup = align_motionbert_sequence(
         kps2_all, kps3_all,
         robust=not args.no_robust,
         rmse_thresh=args.rmse_thresh,
     )
 
     # Compute per-frame RMSE for curiosity / logging
-    rmse_seq = evaluate_alignment_over_sequence(kps2_all, aligned_3d)
+    rmse_seq = evaluate_alignment_over_sequence(kps2_all, aligned_3d_img)
     mean_rmse = float(np.nanmean(rmse_seq))
     max_rmse  = float(np.nanmax(rmse_seq))
 
     # ---------- save -----------------------------------------------------
-    save_aligned_motionbert(aligned_3d, args.out_skel)
+    save_aligned_motionbert(aligned_3d_yup, args.out_skel)
 
     meta = {
-        "similarity_matrix": M.tolist(),      # 4×4  (float32)
+        "similarity_matrix_image": M_img.tolist(),  # 4×4, image frame (y down)
+        "similarity_matrix_y_up":  M_yup.tolist(),  # 4×4, y up
         "mean_RMSE": mean_rmse,
         "max_RMSE":  max_rmse,
         "reference_frame": int(np.nanargmin(rmse_seq)),
         "rmse_per_frame": rmse_seq.tolist(),
     }
+
+    
+
     out_meta = Path(args.out_meta)
     out_meta.parent.mkdir(parents=True, exist_ok=True)
     with out_meta.open("w") as fh:
